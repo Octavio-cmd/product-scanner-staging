@@ -89,7 +89,7 @@
 // Abre la consola de debug (5 toques al logo) y confirma esta línea antes de
 // dar por buena cualquier prueba. Si no coincide, el iPhone está cacheado.
 var _psSbInvVacio = {};
-window.PS_BUILD = '2026-08-18c';
+window.PS_BUILD = '2026-08-28-ios-fix-v3';
 try {
   console.log('[Savvy Scanner] build ' + window.PS_BUILD);
   window.addEventListener('load', function(){
@@ -893,40 +893,350 @@ function closeCfg(){$('cfgOv').classList.remove('on');}
 
 // ── Savvy Universal Scanner (html5-qrcode) ───────────────────
 var _savvyScanners = {};
+var _scannerInitInProgress = {};
+var _scannerCancelled = {};
 
-const SAVVY_SCAN_CONFIG = {
-  fps: 20,
-  qrbox: { width: 280, height: 120 },  // cajita horizontal para barcodes
-  aspectRatio: 1.7,
-  disableFlip: false,
-  experimentalFeatures: {
-    useBarCodeDetectorIfSupported: true
-  },
-  formatsToSupport: [
-    Html5QrcodeSupportedFormats.EAN_13,
-    Html5QrcodeSupportedFormats.EAN_8,
-    Html5QrcodeSupportedFormats.UPC_A,
-    Html5QrcodeSupportedFormats.UPC_E,
-    Html5QrcodeSupportedFormats.CODE_128,
-    Html5QrcodeSupportedFormats.CODE_39,
-    Html5QrcodeSupportedFormats.QR_CODE,
-    Html5QrcodeSupportedFormats.DATA_MATRIX,
-  ]
-};
+// Detectar iOS Safari
+function isIOSSafari() {
+  var ua = navigator.userAgent.toLowerCase();
+  var isIOS = /iphone|ipad|ipod/.test(ua);
+  var isSafari = /safari/.test(ua) && !/chrome|crios|firefox|opera/.test(ua);
+  return isIOS && isSafari;
+}
+
+const SAVVY_SCAN_CONFIG = (() => {
+  var baseConfig = {
+    fps: isIOSSafari() ? 10 : 20,
+    qrbox: { width: 280, height: 120 },
+    disableFlip: false,
+    experimentalFeatures: {},
+    formatsToSupport: [
+      Html5QrcodeSupportedFormats.EAN_13,
+      Html5QrcodeSupportedFormats.EAN_8,
+      Html5QrcodeSupportedFormats.UPC_A,
+      Html5QrcodeSupportedFormats.UPC_E,
+      Html5QrcodeSupportedFormats.CODE_128,
+      Html5QrcodeSupportedFormats.CODE_39,
+      Html5QrcodeSupportedFormats.QR_CODE,
+      Html5QrcodeSupportedFormats.DATA_MATRIX,
+    ]
+  };
+
+  if (isIOSSafari()) {
+    baseConfig.facingMode = 'environment';
+    // NO incluir aspectRatio para iOS
+    baseConfig.experimentalFeatures = {
+      useBarCodeDetectorIfSupported: false
+    };
+  } else {
+    // Otros navegadores: preservar original
+    baseConfig.aspectRatio = 1.7;
+    baseConfig.experimentalFeatures = {
+      useBarCodeDetectorIfSupported: true
+    };
+  }
+
+  return baseConfig;
+})();
+
+// Validar que stream esté activo
+function validateVideoStream(videoElement) {
+  if (!videoElement.srcObject) {
+    console.warn('[Scanner] srcObject no existe');
+    return false;
+  }
+
+  var tracks = videoElement.srcObject.getTracks();
+  if (tracks.length === 0) {
+    console.warn('[Scanner] No hay tracks en srcObject');
+    return false;
+  }
+
+  var videoTrack = tracks.find(function(t) { return t.kind === 'video'; });
+  if (!videoTrack) {
+    console.warn('[Scanner] No hay video track');
+    return false;
+  }
+
+  if (videoTrack.readyState !== 'live') {
+    console.warn('[Scanner] Video track no está live:', videoTrack.readyState);
+    return false;
+  }
+
+  if (videoElement.readyState < 2) {
+    console.warn('[Scanner] video.readyState < 2 (no hay datos)');
+    return false;
+  }
+
+  if (videoElement.paused) {
+    console.warn('[Scanner] Video está paused');
+    return false;
+  }
+
+  if (videoElement.videoWidth === 0 || videoElement.videoHeight === 0) {
+    console.warn('[Scanner] videoWidth/videoHeight es 0:', videoElement.videoWidth, 'x', videoElement.videoHeight);
+    return false;
+  }
+
+  return true;
+}
+
+// Monitoreo corto para detectar visor negro
+// Retorna: "valid", "cancelled", o "failed"
+function monitorVideoStream(videoElementId) {
+  return new Promise(function(resolve) {
+    var startTime = Date.now();
+    var timeoutMs = 3000;  // 3 segundos
+    var videoElement = null;
+
+    var checkInterval = setInterval(function() {
+      var elapsed = Date.now() - startTime;
+
+      // Si fue cancelado, terminar inmediatamente
+      if (_scannerCancelled[videoElementId]) {
+        clearInterval(checkInterval);
+        console.log('[Scanner] Monitor cancelado');
+        resolve('cancelled');
+        return;
+      }
+
+      // Intentar obtener el elemento <video> si aún no lo tenemos
+      if (!videoElement) {
+        videoElement = document.querySelector('#qr-video video');
+        if (!videoElement) {
+          console.log('[Scanner] Esperando <video> elemento...');
+          // Continuar checando en la siguiente iteración
+          if (elapsed >= timeoutMs) {
+            clearInterval(checkInterval);
+            console.error('[Scanner] Visor negro detectado en', elapsed, 'ms - <video> no encontrado');
+            handleBlackScreenTimeout(videoElementId);
+            resolve('failed');
+          }
+          return;
+        }
+      }
+
+      // Criterios para stream válido
+      var isValid =
+        videoElement.srcObject &&
+        videoElement.srcObject.getTracks().length > 0 &&
+        videoElement.videoWidth > 0 &&
+        videoElement.videoHeight > 0 &&
+        videoElement.srcObject.getTracks().find(function(t) { return t.kind === 'video'; }) &&
+        videoElement.srcObject.getTracks().find(function(t) { return t.kind === 'video'; }).readyState === 'live' &&
+        !videoElement.paused;
+
+      if (isValid) {
+        clearInterval(checkInterval);
+        console.log('[Scanner] Stream válido detectado en', elapsed, 'ms');
+        resolve('valid');
+        return;
+      }
+
+      if (elapsed >= timeoutMs) {
+        clearInterval(checkInterval);
+        console.error('[Scanner] Visor negro detectado en', elapsed, 'ms - stream no inicializado');
+        handleBlackScreenTimeout(videoElementId);
+        resolve('failed');
+        return;
+      }
+    }, 300);  // Chequear cada 300ms
+  });
+}
+
+// Manejar timeout/visor negro
+function handleBlackScreenTimeout(videoElementId) {
+  console.error('[Scanner] Cerrando scanner por visor negro');
+
+  savvyStopScan(videoElementId).then(function() {
+    var qrDiv = document.getElementById(videoElementId);
+    if (qrDiv) {
+      qrDiv.innerHTML = '';
+      var msgDiv = document.createElement('div');
+      msgDiv.style.cssText = 'color:#d32f2f;padding:20px;text-align:center;font-size:14px;line-height:1.5;background:#ffebee;border-radius:4px;margin:10px;';
+      msgDiv.innerHTML = '<strong>⚠️ No se pudo iniciar la cámara</strong><br>Verifica los permisos en Configuración &gt; Safari &gt; Cámara<br><small>(iOS: modo privado/compartido tiene limitaciones)</small>';
+      qrDiv.appendChild(msgDiv);
+    }
+
+    var modal = document.getElementById('scr-cam');
+    if (modal) {
+      modal.classList.remove('on');
+    }
+  }).catch(function(err) {
+    console.warn('[Scanner] Error cerrando después de visor negro:', err.message);
+  });
+}
+
+// Manejar otros errores
+function handleScannerError(videoElementId, error) {
+  console.error('[Scanner] Error:', error);
+
+  var qrDiv = document.getElementById(videoElementId);
+  if (qrDiv) {
+    qrDiv.innerHTML = '';
+    var msgDiv = document.createElement('div');
+    msgDiv.style.cssText = 'color:#d32f2f;padding:20px;text-align:center;font-size:14px;';
+    msgDiv.textContent = '❌ Error: ' + (error.message || 'Desconocido');
+    qrDiv.appendChild(msgDiv);
+  }
+
+  var modal = document.getElementById('scr-cam');
+  if (modal) {
+    modal.classList.remove('on');
+  }
+}
+
+// Abrir scanner con manejo iOS
+async function savvyOpenBarcodeScanner() {
+  var videoElementId = 'qr-video';
+
+  // Validar que no esté ya abierto
+  if (_scannerInitInProgress[videoElementId]) {
+    console.warn('[Scanner] Ya hay una apertura en progreso');
+    return;
+  }
+
+  // Validar Html5Qrcode disponible
+  if (typeof window.Html5Qrcode === 'undefined') {
+    alert('Librería de escaneo no cargada. Recargue la página.');
+    console.error('Html5Qrcode not available');
+    return;
+  }
+
+  // Marcar que está iniciando
+  _scannerInitInProgress[videoElementId] = true;
+  delete _scannerCancelled[videoElementId];
+
+  try {
+    // PASO 1: Activar modal #scr-cam
+    var modal = document.getElementById('scr-cam');
+    if (modal) {
+      modal.classList.add('on');
+      console.log('[Scanner] Modal #scr-cam activado');
+    }
+
+    // PASO 2: Esperar dos requestAnimationFrame
+    var frameCount = 0;
+    await new Promise(function(resolve) {
+      function checkFrames() {
+        frameCount++;
+        if (frameCount >= 2) {
+          resolve();
+        } else {
+          requestAnimationFrame(checkFrames);
+        }
+      }
+      requestAnimationFrame(checkFrames);
+    });
+
+    console.log('[Scanner] requestAnimationFrame completado, iniciando scanner');
+
+    // PASO 3: Iniciar scanner - verificar cancelación antes
+    if (_scannerCancelled[videoElementId]) {
+      console.log('[Scanner] Inicialización cancelada por usuario');
+      delete _scannerInitInProgress[videoElementId];
+      return;
+    }
+
+    var started = await savvyStartScan(videoElementId, savvyProcessScan);
+
+    // Verificar si start() fue exitoso
+    if (started !== true) {
+      console.log('[Scanner] savvyStartScan retornó false/falsy, deteniendo flujo');
+      delete _scannerInitInProgress[videoElementId];
+      return;
+    }
+
+    // PASO 4: Post-start - inyectar atributos iOS después de 300ms
+    if (_scannerCancelled[videoElementId]) {
+      console.log('[Scanner] Post-start cancelado antes de espera 300ms');
+      await savvyStopScan(videoElementId);
+      delete _scannerInitInProgress[videoElementId];
+      return;
+    }
+
+    await new Promise(function(resolve) {
+      setTimeout(async function() {
+        var videoElement = document.querySelector('#qr-video video');
+        if (videoElement) {
+          console.log('[Scanner] Elemento <video> encontrado, aplicando atributos iOS');
+
+          // PASO 1: Aplicar atributos iOS
+          videoElement.setAttribute('playsinline', 'true');
+          videoElement.setAttribute('autoplay', 'true');
+          videoElement.setAttribute('muted', 'true');
+          videoElement.muted = true;
+
+          // PASO 2: Intentar play() inmediatamente
+          try {
+            console.log('[Scanner] Intentando videoElement.play()');
+            await videoElement.play();
+            console.log('[Scanner] play() completado exitosamente');
+          } catch (playErr) {
+            console.warn('[Scanner] play() rechazado:', playErr.message);
+            // No bloquear flujo - permitir que monitorVideoStream valide
+          }
+
+          // PASO 3: Validar stream DESPUÉS de intentar play()
+          if (validateVideoStream(videoElement)) {
+            console.log('[Scanner] Stream válido después de play()');
+          } else {
+            console.warn('[Scanner] Stream no válido después de play() - monitorVideoStream validará');
+          }
+        } else {
+          console.warn('[Scanner] <video> no encontrado después de start()');
+        }
+        resolve();
+      }, 300);
+    });
+
+    // Después de espera 300ms: verificar cancelación nuevamente
+    if (_scannerCancelled[videoElementId]) {
+      console.log('[Scanner] Cancelado después de espera 300ms');
+      await savvyStopScan(videoElementId);
+      delete _scannerInitInProgress[videoElementId];
+      return;
+    }
+
+    // PASO 5: Monitoreo corto para detectar visor negro
+    var monitorResult = await monitorVideoStream(videoElementId);
+
+    if (monitorResult === 'cancelled') {
+      console.log('[Scanner] Monitoreo reportó cancelación');
+      await savvyStopScan(videoElementId);
+      delete _scannerInitInProgress[videoElementId];
+      return;
+    }
+
+    if (monitorResult === 'failed') {
+      console.log('[Scanner] Monitoreo reportó fallo - handleBlackScreenTimeout ya limpió');
+      delete _scannerInitInProgress[videoElementId];
+      return;
+    }
+
+    // monitorResult === 'valid'
+    delete _scannerInitInProgress[videoElementId];
+
+  } catch(err) {
+    console.error('[Scanner] Error abriendo scanner:', err.message);
+    handleScannerError(videoElementId, err);
+    delete _scannerInitInProgress[videoElementId];
+  }
+}
 
 async function savvyStartScan(videoElementId, onResult) {
   console.log('📷 savvyStartScan starting for element:', videoElementId);
   await savvyStopScan(videoElementId);
-  
+
   const videoEl = document.getElementById(videoElementId);
   if(!videoEl){
     console.error('❌ Video element not found:', videoElementId);
     toast('❌ Camera container not found');
-    return;
+    return false;
   }
-  
+
   console.log('✅ Video element found:', videoEl);
-  
+
   var scanner = new Html5Qrcode(videoElementId, {
     formatsToSupport: SAVVY_SCAN_CONFIG.formatsToSupport,
     experimentalFeatures: SAVVY_SCAN_CONFIG.experimentalFeatures,
@@ -935,14 +1245,21 @@ async function savvyStartScan(videoElementId, onResult) {
   _savvyScanners[videoElementId] = scanner;
   try {
     console.log('📱 Requesting camera access...');
+
+    // Build scanConfig dynamically, excluding aspectRatio for iOS
+    var scanConfig = {
+      fps: SAVVY_SCAN_CONFIG.fps,
+      qrbox: SAVVY_SCAN_CONFIG.qrbox,
+      disableFlip: SAVVY_SCAN_CONFIG.disableFlip,
+    };
+    // Only add aspectRatio for non-iOS
+    if (!isIOSSafari() && SAVVY_SCAN_CONFIG.aspectRatio) {
+      scanConfig.aspectRatio = SAVVY_SCAN_CONFIG.aspectRatio;
+    }
+
     await scanner.start(
-      { facingMode: 'environment' },
-      {
-        fps: SAVVY_SCAN_CONFIG.fps,
-        qrbox: SAVVY_SCAN_CONFIG.qrbox,
-        aspectRatio: SAVVY_SCAN_CONFIG.aspectRatio,
-        disableFlip: SAVVY_SCAN_CONFIG.disableFlip,
-      },
+      { facingMode: SAVVY_SCAN_CONFIG.facingMode || 'environment' },
+      scanConfig,
       (decoded) => {
         console.log('✅ QR Code found:', decoded);
         savvyStopScan(videoElementId);
@@ -950,18 +1267,76 @@ async function savvyStartScan(videoElementId, onResult) {
       },
       () => {}
     );
+
+    // Check cancellation after start completes
+    if (_scannerCancelled[videoElementId]) {
+      console.log('[Scanner] Cancelado después de start()');
+      await savvyStopScan(videoElementId);
+      return false;
+    }
+
     console.log('✅ Camera started successfully');
+    return true;
   } catch(e) {
     console.error('❌ Camera error:', e.message);
     toast('❌ No camera access: ' + e.message);
+
+    try {
+      await scanner.clear();
+      console.log('[Scanner] clear() completado después de error start()');
+    } catch (clearErr) {
+      console.warn('[Scanner] clear() rechazado después de error:', clearErr.message);
+    }
+
     delete _savvyScanners[videoElementId];
+    var qrDiv = document.getElementById(videoElementId);
+    if (qrDiv) {
+      qrDiv.innerHTML = '';
+      console.log('[Scanner] Contenedor limpiado después de error start()');
+    }
+
+    throw e;
   }
 }
 
 async function savvyStopScan(videoElementId) {
-  if (_savvyScanners[videoElementId]) {
-    try { await _savvyScanners[videoElementId].stop(); } catch(e) {}
-    delete _savvyScanners[videoElementId];
+  console.log('[Scanner] Deteniendo scanner:', videoElementId);
+
+  var scanner = _savvyScanners[videoElementId];
+
+  if (!scanner) {
+    console.warn('[Scanner] No hay scanner registrado para:', videoElementId);
+    var qrDiv = document.getElementById(videoElementId);
+    if (qrDiv) {
+      qrDiv.innerHTML = '';
+    }
+    return;
+  }
+
+  try {
+    // Detener captura directamente sin verificar _isScanning
+    await scanner.stop();
+    console.log('[Scanner] stop() completado');
+  } catch (stopErr) {
+    console.warn('[Scanner] Error deteniendo scanner:', stopErr.message);
+  }
+
+  try {
+    // Limpiar recursos internos
+    await scanner.clear();
+    console.log('[Scanner] clear() completado');
+  } catch (clearErr) {
+    console.warn('[Scanner] clear() rechazado (ok):', clearErr.message);
+  }
+
+  // Eliminar del registro
+  delete _savvyScanners[videoElementId];
+
+  // Limpiar contenedor
+  var qrDiv = document.getElementById(videoElementId);
+  if (qrDiv) {
+    qrDiv.innerHTML = '';
+    console.log('[Scanner] Contenedor #' + videoElementId + ' limpiado');
   }
 }
 

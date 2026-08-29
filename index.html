@@ -509,11 +509,26 @@
   <div id="qr-video" style="width:100%;height:400px;border-radius:12px;overflow:hidden;background:#000;display:flex;align-items:center;justify-content:center;color:#fff;font-size:14px"></div>
   <button class="cam-st" id="camStop" onclick="
     console.log('❌ Cancel clicked');
-    if(typeof savvyStopScan === 'function'){
-      savvyStopScan('qr-video');
+    if(typeof window === 'object' && window._scannerCancelled) {
+      window._scannerCancelled['qr-video'] = true;
     }
-    document.querySelectorAll('.scr').forEach(s=>s.classList.remove('on'));
-    document.getElementById('scr-res').classList.add('on');
+    (async function(){
+      var initInProgress = window._scannerInitInProgress && window._scannerInitInProgress['qr-video'];
+      if(initInProgress){
+        console.log('[CANCEL] start() aún pendiente, solo cerrando modal');
+        var modal = document.getElementById('scr-cam');
+        if(modal){
+          modal.classList.remove('on');
+        }
+      }else{
+        console.log('[CANCEL] scanner ya iniciado, llamando savvyStopScan');
+        if(typeof savvyStopScan === 'function'){
+          await savvyStopScan('qr-video');
+        }
+        document.querySelectorAll('.scr').forEach(s=>s.classList.remove('on'));
+        document.getElementById('scr-res').classList.add('on');
+      }
+    })();
     return false;
   ">✕ CANCEL</button>
 </div>
@@ -531,17 +546,11 @@
         style="width:100%;background:linear-gradient(135deg,#FF6B35,#E71D36);border:none;border-radius:10px;padding:13px;color:#fff;font-size:15px;font-weight:800;cursor:pointer;margin-bottom:8px"
         onclick="
           console.log('📷 Camera button (results) clicked!');
-          document.querySelectorAll('.scr').forEach(s=>s.classList.remove('on'));
-          document.getElementById('scr-cam').classList.add('on');
-          setTimeout(function(){
-            if(typeof savvyStartScan === 'function'){
-              savvyStartScan('qr-video', async txt => {
-                analyze(txt.replace(/\\D/g,''));
-              });
-            }else{
-              console.error('❌ savvyStartScan not defined!');
-            }
-          }, 100);
+          if(typeof savvyOpenBarcodeScanner === 'function'){
+            savvyOpenBarcodeScanner();
+          }else{
+            console.error('❌ savvyOpenBarcodeScanner not defined!');
+          }
           return false;
         ">
         📷 Scan Barcode
@@ -599,6 +608,6 @@
 
 <button class="fab" id="fab">📋 CSV <div class="fbc" id="fabN">0</div></button>
 
-<script src="app.js"></script>
+<script src="app.js?v=2026-08-28-ios-fix-v3"></script>
 </body>
 </html>
