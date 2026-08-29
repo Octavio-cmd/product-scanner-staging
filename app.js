@@ -89,7 +89,7 @@
 // Abre la consola de debug (5 toques al logo) y confirma esta línea antes de
 // dar por buena cualquier prueba. Si no coincide, el iPhone está cacheado.
 var _psSbInvVacio = {};
-window.PS_BUILD = '2026-08-28-ios-fix-v3';
+window.PS_BUILD = '2026-08-29-camera-diagnostic-v4';
 try {
   console.log('[Savvy Scanner] build ' + window.PS_BUILD);
   window.addEventListener('load', function(){
@@ -1044,46 +1044,119 @@ function monitorVideoStream(videoElementId) {
   });
 }
 
-// Manejar timeout/visor negro
+// Manejar timeout/visor negro — MANTIENE MODAL ABIERTO para diagnóstico
 function handleBlackScreenTimeout(videoElementId) {
-  console.error('[Scanner] Cerrando scanner por visor negro');
+  console.error('[Scanner] BLACK_SCREEN_TIMEOUT detectado - manteniendo modal abierto para diagnóstico');
 
   savvyStopScan(videoElementId).then(function() {
     var qrDiv = document.getElementById(videoElementId);
     if (qrDiv) {
       qrDiv.innerHTML = '';
-      var msgDiv = document.createElement('div');
-      msgDiv.style.cssText = 'color:#d32f2f;padding:20px;text-align:center;font-size:14px;line-height:1.5;background:#ffebee;border-radius:4px;margin:10px;';
-      msgDiv.innerHTML = '<strong>⚠️ No se pudo iniciar la cámara</strong><br>Verifica los permisos en Configuración &gt; Safari &gt; Cámara<br><small>(iOS: modo privado/compartido tiene limitaciones)</small>';
-      qrDiv.appendChild(msgDiv);
+
+      // Contenedor principal del error
+      var errorContainer = document.createElement('div');
+      errorContainer.style.cssText = 'background:#ffebee;border:2px solid #d32f2f;border-radius:8px;padding:16px;margin:8px;color:#333;font-family:system-ui,sans-serif;';
+
+      // Título del error
+      var title = document.createElement('div');
+      title.style.cssText = 'font-weight:bold;font-size:16px;color:#d32f2f;margin-bottom:12px;';
+      title.textContent = '⚠️ BLACK_SCREEN_TIMEOUT';
+      errorContainer.appendChild(title);
+
+      // Descripción
+      var desc = document.createElement('div');
+      desc.style.cssText = 'font-size:13px;line-height:1.6;margin-bottom:12px;color:#555;';
+      desc.textContent = 'La cámara no respondió en 3 segundos. Verifica los permisos en Configuración > Safari > Cámara.';
+      errorContainer.appendChild(desc);
+
+      // Datos técnicos
+      var techDiv = document.createElement('div');
+      techDiv.style.cssText = 'background:#fff;border:1px solid #e0e0e0;border-radius:4px;padding:10px;font-size:12px;font-family:monospace;line-height:1.4;';
+
+      var videoElement = document.querySelector('#qr-video video');
+      var techs = [];
+      techs.push('VIDEO_ELEMENT: ' + (videoElement ? 'existe' : 'NO EXISTE'));
+
+      if (videoElement) {
+        techs.push('srcObject: ' + (videoElement.srcObject ? 'sí' : 'no'));
+        techs.push('readyState: ' + videoElement.readyState + ' (0=HAVE_NOTHING, 1=HAVE_METADATA, 2=HAVE_CURRENT_DATA, 3=HAVE_FUTURE_DATA, 4=HAVE_ENOUGH_DATA)');
+        techs.push('paused: ' + videoElement.paused);
+        techs.push('videoWidth: ' + videoElement.videoWidth);
+        techs.push('videoHeight: ' + videoElement.videoHeight);
+
+        if (videoElement.srcObject) {
+          var tracks = videoElement.srcObject.getTracks();
+          techs.push('tracks.length: ' + tracks.length);
+          tracks.forEach(function(t, i) {
+            techs.push('  track[' + i + '].kind=' + t.kind + ', readyState=' + t.readyState);
+          });
+        } else {
+          techs.push('srcObject.getTracks(): N/A (no srcObject)');
+        }
+      }
+
+      techDiv.textContent = techs.join('\n');
+      errorContainer.appendChild(techDiv);
+
+      // Instrucción para cerrar
+      var closeInstr = document.createElement('div');
+      closeInstr.style.cssText = 'font-size:12px;color:#999;margin-top:12px;font-style:italic;';
+      closeInstr.textContent = '→ Usa el botón CANCEL para cerrar';
+      errorContainer.appendChild(closeInstr);
+
+      qrDiv.appendChild(errorContainer);
     }
 
-    var modal = document.getElementById('scr-cam');
-    if (modal) {
-      modal.classList.remove('on');
-    }
+    // NO CERRAMOS EL MODAL — el usuario debe usar CANCEL manualmente
   }).catch(function(err) {
-    console.warn('[Scanner] Error cerrando después de visor negro:', err.message);
+    console.warn('[Scanner] Error durante handleBlackScreenTimeout:', err.message);
   });
 }
 
-// Manejar otros errores
+// Manejar errores de inicio — MANTIENE MODAL ABIERTO para diagnóstico
 function handleScannerError(videoElementId, error) {
-  console.error('[Scanner] Error:', error);
+  console.error('[Scanner] CAMERA_START_ERROR:', error.name, error.message);
 
-  var qrDiv = document.getElementById(videoElementId);
-  if (qrDiv) {
-    qrDiv.innerHTML = '';
-    var msgDiv = document.createElement('div');
-    msgDiv.style.cssText = 'color:#d32f2f;padding:20px;text-align:center;font-size:14px;';
-    msgDiv.textContent = '❌ Error: ' + (error.message || 'Desconocido');
-    qrDiv.appendChild(msgDiv);
-  }
+  savvyStopScan(videoElementId).then(function() {
+    var qrDiv = document.getElementById(videoElementId);
+    if (qrDiv) {
+      qrDiv.innerHTML = '';
 
-  var modal = document.getElementById('scr-cam');
-  if (modal) {
-    modal.classList.remove('on');
-  }
+      // Contenedor principal del error
+      var errorContainer = document.createElement('div');
+      errorContainer.style.cssText = 'background:#ffebee;border:2px solid #d32f2f;border-radius:8px;padding:16px;margin:8px;color:#333;font-family:system-ui,sans-serif;';
+
+      // Título del error
+      var title = document.createElement('div');
+      title.style.cssText = 'font-weight:bold;font-size:16px;color:#d32f2f;margin-bottom:12px;';
+      title.textContent = '❌ CAMERA_START_ERROR';
+      errorContainer.appendChild(title);
+
+      // Error name
+      var nameDiv = document.createElement('div');
+      nameDiv.style.cssText = 'font-size:13px;font-weight:600;color:#c62828;margin-bottom:6px;';
+      nameDiv.textContent = error.name || 'Unknown Error';
+      errorContainer.appendChild(nameDiv);
+
+      // Error message con monospace
+      var msgDiv = document.createElement('div');
+      msgDiv.style.cssText = 'background:#fff;border:1px solid #e0e0e0;border-radius:4px;padding:10px;font-size:12px;font-family:monospace;line-height:1.4;word-break:break-word;';
+      msgDiv.textContent = error.message || '(sin mensaje)';
+      errorContainer.appendChild(msgDiv);
+
+      // Instrucción para cerrar
+      var closeInstr = document.createElement('div');
+      closeInstr.style.cssText = 'font-size:12px;color:#999;margin-top:12px;font-style:italic;';
+      closeInstr.textContent = '→ Usa el botón CANCEL para cerrar';
+      errorContainer.appendChild(closeInstr);
+
+      qrDiv.appendChild(errorContainer);
+    }
+
+    // NO CERRAMOS EL MODAL — el usuario debe usar CANCEL manualmente
+  }).catch(function(err) {
+    console.warn('[Scanner] Error durante handleScannerError:', err.message);
+  });
 }
 
 // Abrir scanner con manejo iOS

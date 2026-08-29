@@ -242,8 +242,8 @@ test('savvyStopScan() obtiene y usa instancia de _savvyScanners', () => {
 test('Cache busting real: app.js?v=', () => {
   assert(indexContent.includes('app.js?v='),
     'index.html debe cargar app.js con parámetro ?v=');
-  assert(indexContent.includes('v=2026-08-28-ios-fix'),
-    'Versión debe incluir fecha de fix');
+  assert(indexContent.includes('v=2026-08-29-camera-diagnostic'),
+    'Versión debe incluir fecha de diagnostic update');
 });
 
 // ─────────────────────────────────────────────────────────────
@@ -297,9 +297,9 @@ test('#qr-video es DIV vacío (html5-qrcode generará el <video>)', () => {
 // ─────────────────────────────────────────────────────────────
 // TEST 17: PS_BUILD actualizado
 // ─────────────────────────────────────────────────────────────
-test('PS_BUILD actualizado a 2026-08-28-ios-fix-v3', () => {
-  assert(appContent.includes("window.PS_BUILD = '2026-08-28-ios-fix-v3'"),
-    'PS_BUILD debe estar actualizado');
+test('PS_BUILD actualizado a 2026-08-29-camera-diagnostic-v4', () => {
+  assert(appContent.includes("window.PS_BUILD = '2026-08-29-camera-diagnostic-v4'"),
+    'PS_BUILD debe estar actualizado con versión camera-diagnostic');
 });
 
 // ─────────────────────────────────────────────────────────────
@@ -598,4 +598,80 @@ test('clRemoveBackground lanza error en staging (no intenta fetch a rembg)', () 
     'NO debe quedar extracción de base64 después del throw');
 });
 
-console.log('\n✅ Todos los 35 tests de scanner iOS ejecutados!');
+// ─────────────────────────────────────────────────────────────
+// TEST 36: handleBlackScreenTimeout NO cierra modal, mantiene abierto
+// ─────────────────────────────────────────────────────────────
+test('handleBlackScreenTimeout NO cierra modal #scr-cam (mantiene abierto)', () => {
+  const fnText = appContent.substring(
+    appContent.indexOf('function handleBlackScreenTimeout(videoElementId)'),
+    appContent.indexOf('function handleScannerError(videoElementId, error)')
+  );
+
+  // Verificar que NO hay modal.classList.remove('on')
+  assert(!fnText.includes("modal.classList.remove('on')"),
+    'handleBlackScreenTimeout NO debe cerrar modal');
+
+  // Verificar que sí limpia la cámara con savvyStopScan
+  assert(fnText.includes('savvyStopScan'),
+    'handleBlackScreenTimeout debe limpiar cámara con savvyStopScan');
+
+  // Verificar que muestra BLACK_SCREEN_TIMEOUT
+  assert(fnText.includes('BLACK_SCREEN_TIMEOUT'),
+    'Debe mostrar identificador BLACK_SCREEN_TIMEOUT');
+
+  // Verificar que muestra datos técnicos del video
+  assert(fnText.includes('videoWidth') && fnText.includes('videoHeight') && fnText.includes('readyState'),
+    'Debe mostrar datos técnicos: videoWidth, videoHeight, readyState');
+});
+
+// ─────────────────────────────────────────────────────────────
+// TEST 37: handleScannerError NO cierra modal, mantiene abierto
+// ─────────────────────────────────────────────────────────────
+test('handleScannerError NO cierra modal #scr-cam (mantiene abierto)', () => {
+  const fnText = appContent.substring(
+    appContent.indexOf('function handleScannerError(videoElementId, error)'),
+    appContent.indexOf('async function savvyOpenBarcodeScanner()')
+  );
+
+  // Verificar que NO hay modal.classList.remove('on')
+  assert(!fnText.includes("modal.classList.remove('on')"),
+    'handleScannerError NO debe cerrar modal');
+
+  // Verificar que sí limpia la cámara con savvyStopScan
+  assert(fnText.includes('savvyStopScan'),
+    'handleScannerError debe limpiar cámara con savvyStopScan');
+
+  // Verificar que muestra CAMERA_START_ERROR
+  assert(fnText.includes('CAMERA_START_ERROR'),
+    'Debe mostrar identificador CAMERA_START_ERROR');
+
+  // Verificar que muestra error.name y error.message con textContent
+  assert(fnText.includes('error.name') && fnText.includes('error.message'),
+    'Debe mostrar error.name y error.message del error');
+});
+
+// ─────────────────────────────────────────────────────────────
+// TEST 38: CANCEL button cierra modal manualmente
+// ─────────────────────────────────────────────────────────────
+test('CANCEL button permite cerrar modal manualmente después de error', () => {
+  // Buscar el botón CANCEL en index.html
+  assert(indexContent.includes('id="camStop"') && indexContent.includes('CANCEL'),
+    'Debe existir botón CANCEL con id camStop');
+
+  // Verificar que el botón tiene onclick que maneja la cancelación
+  assert(indexContent.includes('_scannerCancelled') && indexContent.includes("document.getElementById('scr-cam')"),
+    'Debe haber código que cierre modal cuando CANCEL es clicado');
+});
+
+// ─────────────────────────────────────────────────────────────
+// TEST 39: Cache busting actualizado para diagnóstico
+// ─────────────────────────────────────────────────────────────
+test('Cache busting PS_BUILD contiene versión diagnóstico', () => {
+  assert(appContent.includes("PS_BUILD = '2026-08-29-camera-diagnostic-v4'"),
+    'PS_BUILD debe estar en versión camera-diagnostic-v4');
+
+  assert(indexContent.includes("app.js?v=2026-08-29-camera-diagnostic-v4"),
+    'index.html debe cargar app.js con cache busting v4');
+});
+
+console.log('\n✅ Todos los 39 tests de scanner iOS y diagnóstico ejecutados!');
