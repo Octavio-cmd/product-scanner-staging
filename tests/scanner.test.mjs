@@ -3,6 +3,7 @@ import assert from 'node:assert';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { execSync } from 'child_process';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const appPath = path.join(__dirname, '../app.js');
@@ -569,4 +570,32 @@ test('setTimeout callback es async para esperar videoElement.play()', () => {
     'Debe seguir orden explícito: atributos → play() → validateVideoStream()');
 });
 
-console.log('\n✅ Todos los 33 tests de scanner iOS ejecutados!');
+// ─────────────────────────────────────────────────────────────
+// TEST 34: Regresión de sintaxis - app.js debe ser válido
+// ─────────────────────────────────────────────────────────────
+test('Sintaxis de app.js es válida (no hay errores de parsing)', () => {
+  try {
+    execSync('node --check ' + appPath, { stdio: 'pipe' });
+    assert(true, 'app.js pasa validación de sintaxis con node --check');
+  } catch (err) {
+    assert(false, 'app.js tiene error de sintaxis: ' + err.message);
+  }
+});
+
+// ─────────────────────────────────────────────────────────────
+// TEST 35: Remove Background deshabilitado en staging (sin fetch activo)
+// ─────────────────────────────────────────────────────────────
+test('clRemoveBackground lanza error en staging (no intenta fetch a rembg)', () => {
+  assert(appContent.includes('async function clRemoveBackground(file, onStatus)'),
+    'clRemoveBackground debe estar definida');
+  assert(appContent.includes("throw new Error('El servicio de eliminación de fondo todavía no está disponible en staging')"),
+    'Debe lanzar error indicando que Remove Background no está disponible');
+  assert(!appContent.includes('savvy-rembg-production'),
+    'NO debe contener URL de producción savvy-rembg-production');
+  assert(!appContent.includes('const rbgRes = null;'),
+    'NO debe quedar el bloque huérfano (const rbgRes = null;)');
+  assert(!appContent.includes('const b64 = dataUrl.split'),
+    'NO debe quedar extracción de base64 después del throw');
+});
+
+console.log('\n✅ Todos los 35 tests de scanner iOS ejecutados!');

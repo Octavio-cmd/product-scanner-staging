@@ -2062,65 +2062,6 @@ async function clRemoveBackground(file, onStatus){
   if(onStatus) onStatus('🚂 Quitando fondo...');
   // [STAGING PILOT] remove-bg service only available in production
   throw new Error('El servicio de eliminación de fondo todavía no está disponible en staging');
-  const b64 = dataUrl.split(',')[1];
-  const rbgRes = null;
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    // format 'jpeg' → el servidor pone el fondo blanco y devuelve JPEG.
-    // Antes bajaba un PNG con transparencia de 4-8 MB que este mismo codigo
-    // aplastaba contra fondo blanco tres lineas despues. Mismo resultado
-    // final, una decima parte del peso.
-    body: JSON.stringify({ image: b64, format: 'jpeg', quality: 92 })
-  });
-  if(!rbgRes.ok) throw new Error('Railway rembg error ' + rbgRes.status);
-  const rbgData = await rbgRes.json();
-  if(!rbgData.success || !rbgData.image) throw new Error('rembg no devolvió imagen');
-
-  const isJpeg = (rbgData.mime === 'image/jpeg') || (rbgData.format === 'jpeg');
-  const pngUrl = 'data:' + (isJpeg ? 'image/jpeg' : 'image/png') + ';base64,' + rbgData.image;
-
-  // ── Fondo blanco ──
-  // Si el servidor ya lo devolvio en JPEG, el fondo blanco ya viene puesto:
-  // volver a pasarlo por canvas solo agregaria otra recompresion JPEG.
-  // Si vino PNG (servidor viejo o fallback), se procesa como siempre.
-  let cleanUrl;
-  if (isJpeg) {
-    if(onStatus) onStatus('🖼️ Listo...');
-    cleanUrl = pngUrl;
-  } else {
-    if(onStatus) onStatus('🖼️ Procesando fondo...');
-    cleanUrl = await new Promise(function(resolve) {
-      var img = new Image();
-      img.onload = function() {
-        var canvas = document.createElement('canvas');
-        canvas.width = img.width;
-        canvas.height = img.height;
-        var ctx = canvas.getContext('2d');
-        // Alta calidad de suavizado
-        ctx.imageSmoothingEnabled = true;
-        ctx.imageSmoothingQuality = 'high';
-        // Dibujar imagen primero
-        ctx.drawImage(img, 0, 0);
-        // Fondo blanco DETRÁS con destination-over
-        ctx.globalCompositeOperation = 'destination-over';
-        ctx.fillStyle = '#ffffff';
-        ctx.fillRect(0, 0, canvas.width, canvas.height);
-        // Calidad JPEG alta (0.95) — buen balance calidad/tamaño para ImgBB
-        resolve(canvas.toDataURL('image/jpeg', 0.95));
-      };
-      img.onerror = function() { resolve(pngUrl); };
-      img.src = pngUrl;
-    });
-  }
-
-  if(onStatus) onStatus('📤 Subiendo...');
-  const imgbbKey = localStorage.getItem('savvy_imgbb_key') || DEFAULT_IMGBB_KEY;
-  let finalUrl = cleanUrl;
-  if (imgbbKey) {
-    const uploaded = await clUploadPhotoToImgBB(cleanUrl, imgbbKey, 'photo');
-    if (uploaded) finalUrl = uploaded;
-  }
-  return { finalUrl, localUrl: cleanUrl };
 }
 
 async function psCapturePhoto(slotId){
