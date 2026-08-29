@@ -242,8 +242,8 @@ test('savvyStopScan() obtiene y usa instancia de _savvyScanners', () => {
 test('Cache busting real: app.js?v=', () => {
   assert(indexContent.includes('app.js?v='),
     'index.html debe cargar app.js con parámetro ?v=');
-  assert(indexContent.includes('v=2026-08-29-camera-diagnostic'),
-    'Versión debe incluir fecha de diagnostic update');
+  assert(indexContent.includes('v=2026-08-29-camera-callback'),
+    'Versión debe incluir fecha de callback update');
 });
 
 // ─────────────────────────────────────────────────────────────
@@ -297,9 +297,9 @@ test('#qr-video es DIV vacío (html5-qrcode generará el <video>)', () => {
 // ─────────────────────────────────────────────────────────────
 // TEST 17: PS_BUILD actualizado
 // ─────────────────────────────────────────────────────────────
-test('PS_BUILD actualizado a 2026-08-29-camera-diagnostic-v4', () => {
-  assert(appContent.includes("window.PS_BUILD = '2026-08-29-camera-diagnostic-v4'"),
-    'PS_BUILD debe estar actualizado con versión camera-diagnostic');
+test('PS_BUILD actualizado a 2026-08-29-camera-callback-v5', () => {
+  assert(appContent.includes("window.PS_BUILD = '2026-08-29-camera-callback-v5'"),
+    'PS_BUILD debe estar actualizado con versión camera-callback');
 });
 
 // ─────────────────────────────────────────────────────────────
@@ -630,7 +630,7 @@ test('handleBlackScreenTimeout NO cierra modal #scr-cam (mantiene abierto)', () 
 test('handleScannerError NO cierra modal #scr-cam (mantiene abierto)', () => {
   const fnText = appContent.substring(
     appContent.indexOf('function handleScannerError(videoElementId, error)'),
-    appContent.indexOf('async function savvyOpenBarcodeScanner()')
+    appContent.indexOf('function savvyProcessScan(decoded)')
   );
 
   // Verificar que NO hay modal.classList.remove('on')
@@ -664,14 +664,14 @@ test('CANCEL button permite cerrar modal manualmente después de error', () => {
 });
 
 // ─────────────────────────────────────────────────────────────
-// TEST 39: Cache busting actualizado para diagnóstico
+// TEST 39: Cache busting actualizado para callback
 // ─────────────────────────────────────────────────────────────
-test('Cache busting PS_BUILD contiene versión diagnóstico', () => {
-  assert(appContent.includes("PS_BUILD = '2026-08-29-camera-diagnostic-v4'"),
-    'PS_BUILD debe estar en versión camera-diagnostic-v4');
+test('Cache busting PS_BUILD contiene versión callback', () => {
+  assert(appContent.includes("PS_BUILD = '2026-08-29-camera-callback-v5'"),
+    'PS_BUILD debe estar en versión camera-callback-v5');
 
-  assert(indexContent.includes("app.js?v=2026-08-29-camera-diagnostic-v4"),
-    'index.html debe cargar app.js con cache busting v4');
+  assert(indexContent.includes("app.js?v=2026-08-29-camera-callback-v5"),
+    'index.html debe cargar app.js con cache busting v5');
 });
 
 console.log('\n✅ Todos los 39 tests de scanner iOS y diagnóstico ejecutados!');

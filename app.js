@@ -89,7 +89,7 @@
 // Abre la consola de debug (5 toques al logo) y confirma esta línea antes de
 // dar por buena cualquier prueba. Si no coincide, el iPhone está cacheado.
 var _psSbInvVacio = {};
-window.PS_BUILD = '2026-08-29-camera-diagnostic-v4';
+window.PS_BUILD = '2026-08-29-camera-callback-v5';
 try {
   console.log('[Savvy Scanner] build ' + window.PS_BUILD);
   window.addEventListener('load', function(){
@@ -1157,6 +1157,26 @@ function handleScannerError(videoElementId, error) {
   }).catch(function(err) {
     console.warn('[Scanner] Error durante handleScannerError:', err.message);
   });
+}
+
+// Callback para procesar el código de barras escaneado
+function savvyProcessScan(decoded) {
+  var v = String(decoded || '').trim();
+  if (!v) return;
+
+  // Detener el scanner
+  if (typeof savvyStopScan === 'function') {
+    savvyStopScan('qr-video');
+  }
+
+  // Cerrar la ventana modal
+  var modal = document.getElementById('scr-cam');
+  if (modal) {
+    modal.classList.remove('on');
+  }
+
+  // Procesar el UPC (remover no-dígitos) y analizar
+  analyze(v.replace(/\D/g, ''));
 }
 
 // Abrir scanner con manejo iOS
