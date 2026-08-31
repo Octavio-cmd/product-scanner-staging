@@ -3570,7 +3570,7 @@ async function _doAnalyze(upc){
 
     // Build prod{} + ebayFull{} in the shape finishAnalyze() expects
     let prod = {name:'',brand:'',found:false};
-    let ebayFull = { found:false, product:null, prices:null, pricing:{}, topTitles:[], activeListings:0, soldCount:0, category:null, priceSource:'railway' };
+    let ebayFull = { found:false, product:null, prices:null, pricing:{}, topTitles:[], activeListings:0, soldCount:0, category:null, categoryName:null, priceSource:'railway' };
 
     if (rwData && (rwData.name || rwData.brand)) {
       prod = {
@@ -3594,6 +3594,9 @@ async function _doAnalyze(upc){
       }
       if (rwData.category) {
         ebayFull.category = rwData.category;
+      }
+      if (rwData.category_name) {
+        ebayFull.categoryName = rwData.category_name;
       }
       ebayFull.priceSource = rwData.data_source || 'railway';
     } else {
@@ -3770,6 +3773,7 @@ async function finishAnalyze(upc, prod, ebayFull, stepIn){
     topTitles:      ebayFull.topTitles || [],
     pricing:        ebayFull.pricing || {},
     category:       ebayFull.category || null,
+    categoryName:   ebayFull.categoryName || '',
     priceSource:    ebayFull.priceSource || 'keyword',
   };
   try{
@@ -3778,25 +3782,49 @@ async function finishAnalyze(upc, prod, ebayFull, stepIn){
     res=await callClaude(upc,prod,ebay);
 
     step='render';
+    // ── BACKEND BRAND IS AUTHORITATIVE ──────────────────────────────────
+    // If backend provided a brand, use it. Claude's brand is only a fallback.
+    const backendBrand = String(prod.brand || '').trim();
+    if (backendBrand) {
+      res.brand = normalizeBrandCase(backendBrand);
+    }
     if(!res.brand||['generic','desconocida','unknown','n/a'].includes(res.brand.toLowerCase().trim())){
       res.brand = prod.brand||'';
     }
     if(!res.title||res.title.includes(upc)||res.title.toLowerCase().includes(' upc ')){
       res.title = buildSmartTitle(prod, res.packSize||1) || res.title;
     }
-    // Validar categoría — si Claude pone categoría padre o default, recalcular desde título
-    const PARENT_CATS = ['26395','293','888','220','1281','2984','14308','20625','6000','16486','11854','31786','20725','36447','67716','11838','184630'];
-    const titleBasedCat = catId(res.title || prod.name || '');
-    if (!res.category || res.category === 'undefined' || PARENT_CATS.includes(String(res.category)) || res.category === '31786') {
-      // Solo usar 31786 si el título realmente es skin care
-      const isSkinCare = /lotion|moisturizer|sunscreen|spf|face wash|serum|toner|cleanser/i.test(res.title||'');
-      if (!isSkinCare && titleBasedCat !== '31786') {
-        res.category = titleBasedCat;
-        res.categoryName = catNm(titleBasedCat);
-      } else if (!res.category || res.category === 'undefined') {
-        // Nunca dejar 'undefined' en pantalla
-        res.category = titleBasedCat || '31786';
-        res.categoryName = catNm(res.category);
+    // ── BACKEND CATEGORY IS AUTHORITATIVE ──────────────────────────────────
+    // If backend provided category data, use it. Claude's category is only a fallback.
+    const backendCategoryId = String(ebay.category || '').trim();
+    const backendCategoryName = String(ebay.categoryName || '').trim();
+
+    if (backendCategoryName) {
+      // Backend has a category name — use it
+      res.categoryName = backendCategoryName;
+      if (backendCategoryId) res.category = backendCategoryId;
+    } else if (backendCategoryId) {
+      // Backend has a category ID but no name
+      res.category = backendCategoryId;
+      // Do NOT call catNm() blindly because it defaults unknown IDs to Skin Care.
+      // Preserve any existing Claude categoryName, or use 'Other'
+      if (!res.categoryName) res.categoryName = 'Other';
+    } else {
+      // Backend has no category data — use title-based fallback (existing logic)
+      // Validar categoría — si Claude pone categoría padre o default, recalcular desde título
+      const PARENT_CATS = ['26395','293','888','220','1281','2984','14308','20625','6000','16486','11854','31786','20725','36447','67716','11838','184630'];
+      const titleBasedCat = catId(res.title || prod.name || '');
+      if (!res.category || res.category === 'undefined' || PARENT_CATS.includes(String(res.category)) || res.category === '31786') {
+        // Solo usar 31786 si el título realmente es skin care
+        const isSkinCare = /lotion|moisturizer|sunscreen|spf|face wash|serum|toner|cleanser/i.test(res.title||'');
+        if (!isSkinCare && titleBasedCat !== '31786') {
+          res.category = titleBasedCat;
+          res.categoryName = catNm(titleBasedCat);
+        } else if (!res.category || res.category === 'undefined') {
+          // Nunca dejar 'undefined' en pantalla
+          res.category = titleBasedCat || '31786';
+          res.categoryName = catNm(res.category);
+        }
       }
     }
 
