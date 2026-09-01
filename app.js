@@ -3691,15 +3691,18 @@ async function analyzeEbayUrl(urlStr){
   let step = 'resolve_url';
 
   try {
-    // Short links (ebay.io) or any URL without /itm/ — resolve via Railway
-    // [STAGING PILOT] /resolve-url endpoint not yet implemented in staging
+    // Short links (ebay.io) or any URL without /itm/ — resolve via authenticated endpoint
     if (urlStr.includes('ebay.io') || !urlStr.match(/\/itm\//)) {
       try {
-        stat('Resolviendo enlace corto...');
-        // Bloqueado en staging: endpoint no disponible
-        toast('ℹ️ Esta función todavía no está disponible en staging');
-        // Continuar con fallback regex
-      } catch(e) { console.warn('resolve-url staging not available:', e.message); }
+        stat('Resolving short link...');
+        const resolveRes = await psAuthFetch('/api/resolve-url?url=' + encodeURIComponent(urlStr), { method: 'GET' });
+        if (resolveRes.ok) {
+          const resolveData = await resolveRes.json();
+          if (resolveData.status === 'success' && resolveData.item_id) {
+            itemId = resolveData.item_id;
+          }
+        }
+      } catch(e) { console.warn('resolve-url error:', e.message); }
     }
 
     // Fallback: extract the item ID directly from the URL
@@ -3728,12 +3731,29 @@ async function analyzeEbayUrl(urlStr){
     step = 'ebay_item';
     stat('Loading eBay item ' + itemId + '...');
     $('lp').textContent = 'Item: ' + itemId;
+    const itemRes = await psAuthFetch('/api/ebay-item?item_id=' + encodeURIComponent(itemId), { method: 'GET' });
+    if (!itemRes.ok) { toast('⚠️ eBay error ' + itemRes.status); screen('res'); return; }
+    const json = await itemRes.json();
+    if (json.status !== 'success' || !json.data) { toast('⚠️ Item not found'); screen('res'); return; }
 
-    // [STAGING PILOT] /ebay-item endpoint not implemented in staging backend
-    // Show staging message and block the remote call
-    toast('ℹ️ Esta función todavía no está disponible en staging');
-    screen('res');
-    return;
+    const d = json.data;
+    const title = d.title || '';
+    const price = d.price || 0;
+    const shippingCost = d.shipping_cost || 0;
+    const totalPrice = d.total_price || (price + shippingCost);
+    const brand = d.brand || '';
+
+    const prod = { name: title, brand: brand, found: !!title, source: 'ebay_url' };
+    if (prod.found) $('lp').textContent = prod.name.substring(0, 50);
+
+    let ebayFull = { found:false, product:null, prices:null, pricing:{}, topTitles: title?[title]:[], activeListings:0, soldCount:0, category:null, priceSource:'ebay_url' };
+    if (totalPrice > 0) {
+      ebayFull.found = true;
+      ebayFull.prices = { low: totalPrice, avg: totalPrice };
+      ebayFull.pricing = { sold: { avg: 0, count: 0 }, active: { low: totalPrice } };
+    }
+
+    await finishAnalyze(itemId, prod, ebayFull, step);
   } catch(e) {
     console.error('analyzeEbayUrl error:', e);
     renderAnalyzeError(step, e, itemId||urlStr, {name:'',brand:'',found:false}, {found:false});
