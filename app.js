@@ -134,7 +134,7 @@ let _keysLoaded = false;
 // backend. Aqui solo viaja un token de sesion firmado.
 // Backend centralizado en una sola constante (staging).
 // ══════════════════════════════════════════════════════════════
-const SAVVY_API = 'https://ample-imagination-clothing-staging.up.railway.app';
+const SAVVY_API = 'https://savvy-ebay-prices-production.up.railway.app';
 const SAVVY_MODELO = 'claude-haiku-4-5-20251001';
 
 // sessionStorage y no localStorage: los iPhone del almacen son compartidos,
