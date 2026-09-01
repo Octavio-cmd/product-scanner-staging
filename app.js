@@ -2311,7 +2311,7 @@ function psAddExtraPhoto(){
     renderExtraPhotosUI();
 
     try{
-      const { finalUrl, localUrl } = await psRemoveBackgroundPipeline(file, function(msg){
+      const { finalUrl, localUrl } = await clRemoveBackground(file, function(msg){
         var el = document.getElementById('ps-extra-slot-' + idx);
         if(el) el.innerHTML = '<div style="text-align:center;padding:8px"><div class="sp" style="width:20px;height:20px;margin:0 auto 4px"></div><div style="font-size:9px;color:var(--mu)">'+msg+'</div></div>';
       });
