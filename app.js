@@ -2457,7 +2457,7 @@ function psDrawBadge(ctx, count, sz){
 
 // Genera la imagen del paquete: `count` copias de `img` + distintivo (si count>1)
 function psGeneratePackImage(img, count){
-  const sz=2048, cv=document.createElement('canvas'); cv.width=sz; cv.height=sz;
+  const sz=1400, cv=document.createElement('canvas'); cv.width=sz; cv.height=sz;
   const cx=cv.getContext('2d'); cx.fillStyle='#FFF'; cx.fillRect(0,0,sz,sz);
   const positions = psComputeLayout(count, sz, img.width/img.height);
   positions.forEach(p => cx.drawImage(img, p.x-p.w/2, p.y-p.h/2, p.w, p.h));
@@ -2467,7 +2467,7 @@ function psGeneratePackImage(img, count){
 
 // Genera la foto secundaria (BACK) centrada sola, sin distintivo, sin duplicar
 function psGenerateSingleImage(img){
-  const sz=2048, cv=document.createElement('canvas'); cv.width=sz; cv.height=sz;
+  const sz=1400, cv=document.createElement('canvas'); cv.width=sz; cv.height=sz;
   const cx=cv.getContext('2d'); cx.fillStyle='#FFF'; cx.fillRect(0,0,sz,sz);
   const a=img.width/img.height, pd=sz*.02, mw=sz-pd*2, mh=sz-pd*2;
   let w,h; if(a>1){w=mw;h=mw/a;} else {h=mh;w=mh*a;}
