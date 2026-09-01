@@ -2543,11 +2543,21 @@ async function psGenerateAllPacks(){
       return Promise.race([uploadPromise, timeoutPromise]);
     }
 
-    const results = await Promise.all([
-      uploadWithTimeout(backDataUrl, 'pack-back'),
-      ...extraDataUrls.map(function(du, i){ return uploadWithTimeout(du, 'pack-extra-'+i); }),
-      ..._activePacks.map(function(p){ return uploadWithTimeout(frontDataUrls[p], 'pack-'+p); })
-    ]);
+    // Build upload tasks array as lazy functions (NO execution during construction)
+    const uploadTasks = [
+      function(){ return uploadWithTimeout(backDataUrl, 'pack-back'); },
+      ...extraDataUrls.map(function(du, i){ return function(){ return uploadWithTimeout(du, 'pack-extra-'+i); }; }),
+      ..._activePacks.map(function(p){ return function(){ return uploadWithTimeout(frontDataUrls[p], 'pack-'+p); }; })
+    ];
+
+    // Execute with max 2 concurrent uploads to reduce main-thread compression saturation
+    const results = [];
+    const maxConcurrency = 2;
+    for (let i = 0; i < uploadTasks.length; i += maxConcurrency) {
+      const batch = uploadTasks.slice(i, i + maxConcurrency);
+      const batchResults = await Promise.all(batch.map(function(task){ return task(); }));
+      results.push(...batchResults);
+    }
     const backUrl = results[0];
     const extraUrls = results.slice(1, 1 + extraDataUrls.length);
     const frontResults = results.slice(1 + extraDataUrls.length);
