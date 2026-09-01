@@ -166,6 +166,9 @@ async function savvyClaude(opciones) {
     const r = await psAuthFetch('/api/claude', {
       method: 'POST',
       signal: opciones.signal,
+      headers: {
+        'Content-Type': 'application/json'
+      },
       body: opciones.body
     });
     if (r.status === 429) { try { toast('\u23F3 Limite de uso alcanzado. Espera un momento.'); } catch(e) {} }
