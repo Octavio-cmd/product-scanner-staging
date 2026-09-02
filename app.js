@@ -2391,6 +2391,79 @@ function psLoadImage(src){
   });
 }
 
+// Normaliza CUALQUIER imagen (base64, URL, data URI) a 1200x1200 JPEG cuadrado
+// con fondo blanco, preservando aspect ratio, sin estirar/cropear, ~5-8% padding
+// RECHAZA/LANZA si falsa — no retorna imagen original sin normalizar
+async function normalize1200x1200(src) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    if (typeof src === 'string' && !src.startsWith('data:')) img.crossOrigin = 'anonymous';
+    const timer = setTimeout(() => reject(new Error('Timeout cargando imagen para normalizar (15s)')), 15000);
+
+    img.onload = () => {
+      clearTimeout(timer);
+      try {
+        const SZ = 1200;
+        const cv = document.createElement('canvas');
+        cv.width = SZ;
+        cv.height = SZ;
+        const cx = cv.getContext('2d');
+        cx.imageSmoothingEnabled = true;
+        cx.imageSmoothingQuality = 'high';
+
+        // Llenar fondo blanco
+        cx.fillStyle = '#FFFFFF';
+        cx.fillRect(0, 0, SZ, SZ);
+
+        // Calcular fit con aspect ratio preservation y ~5-8% padding
+        const padding = Math.round(SZ * 0.065); // ~6.5% padding
+        const availableW = SZ - padding * 2;
+        const availableH = SZ - padding * 2;
+
+        const imgAspect = img.width / img.height;
+        let drawW, drawH;
+
+        if (imgAspect > 1) {
+          // Imagen más ancha que alta
+          drawW = availableW;
+          drawH = availableW / imgAspect;
+        } else {
+          // Imagen más alta que ancha
+          drawH = availableH;
+          drawW = availableH * imgAspect;
+        }
+
+        // Asegurar que no exceda límites
+        if (drawW > availableW) {
+          drawW = availableW;
+          drawH = availableW / imgAspect;
+        }
+        if (drawH > availableH) {
+          drawH = availableH;
+          drawW = availableH * imgAspect;
+        }
+
+        // Centrar imagen
+        const x = (SZ - drawW) / 2;
+        const y = (SZ - drawH) / 2;
+
+        cx.drawImage(img, x, y, drawW, drawH);
+        const normalized = cv.toDataURL('image/jpeg', 0.93);
+        resolve(normalized);
+      } catch(e) {
+        reject(new Error('Error en canvas normalizando imagen: ' + (e.message||'desconocido')));
+      }
+    };
+
+    img.onerror = () => {
+      clearTimeout(timer);
+      reject(new Error('No se pudo cargar imagen para normalizar'));
+    };
+
+    img.src = src;
+  });
+}
+
 // Calcula el mejor acomodo (columnas/filas) para `count` copias de una foto
 // dentro de un canvas cuadrado de tamaño `sz`, dado el aspect ratio de la foto.
 function psComputeLayout(count, sz, imgAspect){
@@ -2457,8 +2530,9 @@ function psDrawBadge(ctx, count, sz){
 
 // Genera la imagen del paquete: `count` copias de `img` + distintivo (si count>1)
 function psGeneratePackImage(img, count){
-  const sz=1400, cv=document.createElement('canvas'); cv.width=sz; cv.height=sz;
-  const cx=cv.getContext('2d'); cx.fillStyle='#FFF'; cx.fillRect(0,0,sz,sz);
+  const sz=1200, cv=document.createElement('canvas'); cv.width=sz; cv.height=sz;
+  const cx=cv.getContext('2d'); cx.imageSmoothingEnabled=true; cx.imageSmoothingQuality='high';
+  cx.fillStyle='#FFF'; cx.fillRect(0,0,sz,sz);
   const positions = psComputeLayout(count, sz, img.width/img.height);
   positions.forEach(p => cx.drawImage(img, p.x-p.w/2, p.y-p.h/2, p.w, p.h));
   if (count > 1) psDrawBadge(cx, count, sz);
@@ -2467,8 +2541,9 @@ function psGeneratePackImage(img, count){
 
 // Genera la foto secundaria (BACK) centrada sola, sin distintivo, sin duplicar
 function psGenerateSingleImage(img){
-  const sz=1400, cv=document.createElement('canvas'); cv.width=sz; cv.height=sz;
-  const cx=cv.getContext('2d'); cx.fillStyle='#FFF'; cx.fillRect(0,0,sz,sz);
+  const sz=1200, cv=document.createElement('canvas'); cv.width=sz; cv.height=sz;
+  const cx=cv.getContext('2d'); cx.imageSmoothingEnabled=true; cx.imageSmoothingQuality='high';
+  cx.fillStyle='#FFF'; cx.fillRect(0,0,sz,sz);
   const a=img.width/img.height, pd=sz*.02, mw=sz-pd*2, mh=sz-pd*2;
   let w,h; if(a>1){w=mw;h=mw/a;} else {h=mh;w=mh*a;}
   if(w>mw){w=mw;h=w/a;} if(h>mh){h=mh;w=h*a;}
@@ -4371,34 +4446,61 @@ async function _addBulkInternal() {
 }
 
 async function _doAddBulk(usedTitle, usedSKU, usedPrice, shade, expDate, location, packs, photoUrl) {
-  // Si la foto es base64, intentar subir a ImgBB
-  if (photoUrl && photoUrl.startsWith('data:')) {
-    const imgbbKey = (localStorage.getItem('cl_imgbb_key') || DEFAULT_IMGBB_KEY);
-    if (imgbbKey) {
-      const addBtn = document.getElementById('addBtn');
-      if (addBtn) { addBtn.disabled = true; addBtn.textContent = '📤 Uploading photo...'; }
-      let compressed = photoUrl;
-      try {
-        const img = new Image(); img.src = photoUrl;
-        await new Promise(r => { img.onload = r; img.onerror = r; });
-        const c = document.createElement('canvas');
-        c.width = 800; c.height = 800;
-        c.getContext('2d').drawImage(img, 0, 0, 800, 800);
-        compressed = c.toDataURL('image/jpeg', 0.82);
-      } catch(e) { compressed = photoUrl; }
-      const uploaded = await clUploadPhotoToImgBB(compressed, imgbbKey);
-      if (uploaded) {
-        photoUrl = uploaded;
-        if (cur) { cur._bundleImg = uploaded; cur._imgUrl = uploaded; }
-        toast('✅ Foto subida — agregando al CSV');
+  // Si hay foto, verificar si es de pack generado (ya normalizada) o si necesita normalización
+  if (photoUrl) {
+    // Detectar si la foto es de pack generado (ya 1200x1200)
+    const packImgs = cur && cur._packImages && cur._packImages[packs];
+    const packUrls = packImgs ?
+      [packImgs.front, packImgs.back, ...(packImgs.extras||[])].filter(u => u) :
+      [];
+
+    // photoUrl puede ser: base64 | URL única | URLs múltiples separadas por |
+    const isPackGenerated = packUrls.length > 0 &&
+      photoUrl.split('|').every(url =>
+        url && packUrls.some(purl => String(url).trim() === String(purl).trim())
+      );
+
+    if (!isPackGenerated) {
+      // Foto NO es de pack generado — DEBE normalizarse a 1200x1200 antes de eBay
+      const imgbbKey = (localStorage.getItem('cl_imgbb_key') || DEFAULT_IMGBB_KEY);
+      if (imgbbKey) {
+        const addBtn = document.getElementById('addBtn');
+        if (addBtn) { addBtn.disabled = true; addBtn.textContent = '📤 Normalizing & uploading photo...'; }
+
+        try {
+          // Normalizar a 1200x1200 cuadrado con aspect ratio preservation
+          const normalized = await normalize1200x1200(photoUrl);
+
+          // Si es base64, subir a ImgBB; si es URL externa, no re-subir (usar directamente)
+          if (photoUrl.startsWith('data:')) {
+            const uploaded = await clUploadPhotoToImgBB(normalized, imgbbKey);
+            if (uploaded) {
+              photoUrl = uploaded;
+              if (cur) { cur._bundleImg = uploaded; cur._imgUrl = uploaded; }
+              toast('✅ Foto normalizada y subida — agregando al CSV');
+            } else {
+              toast('⚠️ ImgBB falló — verifica tu API key en ⚙️. Agregando sin foto.');
+              photoUrl = '';
+            }
+          } else {
+            // URL externa normalizada — usar directamente en CSV
+            photoUrl = normalized;
+            toast('✅ Foto normalizada — agregando al CSV');
+          }
+        } catch(e) {
+          console.warn('❌ Error normalizando foto:', e.message);
+          toast('❌ Error normalizando foto — agregando sin foto. Detalle: ' + (e.message||'desconocido'));
+          photoUrl = '';
+        }
+
+        if (addBtn) { addBtn.disabled = false; addBtn.textContent = '➕ ADD TO CSV'; }
       } else {
-        toast('⚠️ ImgBB falló — verifica tu API key en ⚙️. Agregando sin foto.');
+        toast('⚠️ Configura ImgBB en ⚙️ para subir fotos. Agregando sin foto.');
         photoUrl = '';
       }
-      if (addBtn) { addBtn.disabled = false; addBtn.textContent = '➕ ADD TO CSV'; }
     } else {
-      toast('⚠️ Configura ImgBB en ⚙️ para subir fotos. Agregando sin foto.');
-      photoUrl = '';
+      // Foto ES de pack generado — ya está garantizada 1200x1200, no normalizar
+      console.log('✅ Foto de pack generado detectada — usando directamente (ya 1200x1200)');
     }
   }
 
