@@ -2519,9 +2519,9 @@ function psComputeLayout(count, sz, imgAspect){
 
   // 2-PACK: diagonal overlap, rear upper-left, front lower-right
   if (count === 2) {
-    const rearW = isWide ? sz * 0.3 : sz * 0.35;
+    let rearW = isWide ? sz * 0.3 : sz * 0.35;
     let rearH = rearW / imgAspect;
-    const frontW = isWide ? sz * 0.35 : sz * 0.4;
+    let frontW = isWide ? sz * 0.35 : sz * 0.4;
     let frontH = frontW / imgAspect;
 
     // Constrain to max height
@@ -2538,9 +2538,9 @@ function psComputeLayout(count, sz, imgAspect){
 
   // 3-PACK: pyramid - two rear + one large front-center
   else if (count === 3) {
-    const rearW = isWide ? sz * 0.26 : sz * 0.32;
+    let rearW = isWide ? sz * 0.26 : sz * 0.32;
     let rearH = rearW / imgAspect;
-    const frontW = isWide ? sz * 0.36 : sz * 0.42;
+    let frontW = isWide ? sz * 0.36 : sz * 0.42;
     let frontH = frontW / imgAspect;
 
     // Constrain heights
@@ -2563,9 +2563,9 @@ function psComputeLayout(count, sz, imgAspect){
   // 4-PACK: two-tier (2 rear + 2 front)
   else if (count === 4) {
     const gap = 25;
-    const rearW = sz * 0.32;
+    let rearW = sz * 0.32;
     let rearH = rearW / imgAspect;
-    const frontW = sz * 0.35;
+    let frontW = sz * 0.35;
     let frontH = frontW / imgAspect;
 
     // Constrain heights
@@ -2593,11 +2593,11 @@ function psComputeLayout(count, sz, imgAspect){
 
   // 5-PACK: three-tier (2 rear + 1 middle + 2 front)
   else if (count === 5) {
-    const rearW = sz * 0.28;
+    let rearW = sz * 0.28;
     let rearH = rearW / imgAspect;
-    const midW = sz * 0.36;
+    let midW = sz * 0.36;
     let midH = midW / imgAspect;
-    const frontW = sz * 0.3;
+    let frontW = sz * 0.3;
     let frontH = frontW / imgAspect;
     const gap = 20;
 
@@ -2632,9 +2632,9 @@ function psComputeLayout(count, sz, imgAspect){
 
   // 6-PACK: two-tier (3 rear + 3 front)
   else if (count === 6) {
-    const rearW = sz * 0.25;
+    let rearW = sz * 0.25;
     let rearH = rearW / imgAspect;
-    const frontW = sz * 0.28;
+    let frontW = sz * 0.28;
     let frontH = frontW / imgAspect;
     const gap = 15;
 
@@ -2662,11 +2662,11 @@ function psComputeLayout(count, sz, imgAspect){
 
   // 7-PACK: three-tier (3 rear + 2 middle + 2 front)
   else if (count === 7) {
-    const rearW = sz * 0.23;
+    let rearW = sz * 0.23;
     let rearH = rearW / imgAspect;
-    const midW = sz * 0.27;
+    let midW = sz * 0.27;
     let midH = midW / imgAspect;
-    const frontW = sz * 0.3;
+    let frontW = sz * 0.3;
     let frontH = frontW / imgAspect;
     const gap = 12;
 
@@ -2704,11 +2704,11 @@ function psComputeLayout(count, sz, imgAspect){
 
   // 8-PACK: three-tier (3 rear + 3 middle + 2 front)
   else if (count === 8) {
-    const rearW = sz * 0.23;
+    let rearW = sz * 0.23;
     let rearH = rearW / imgAspect;
-    const midW = sz * 0.25;
+    let midW = sz * 0.25;
     let midH = midW / imgAspect;
-    const frontW = sz * 0.3;
+    let frontW = sz * 0.3;
     let frontH = frontW / imgAspect;
     const gap = 12;
 
@@ -2746,11 +2746,11 @@ function psComputeLayout(count, sz, imgAspect){
 
   // 9-PACK: three-tier (3 rear + 3 middle + 3 front)
   else if (count === 9) {
-    const rearW = sz * 0.23;
+    let rearW = sz * 0.23;
     let rearH = rearW / imgAspect;
-    const midW = sz * 0.25;
+    let midW = sz * 0.25;
     let midH = midW / imgAspect;
-    const frontW = sz * 0.26;
+    let frontW = sz * 0.26;
     let frontH = frontW / imgAspect;
     const gap = 12;
 
@@ -2783,11 +2783,11 @@ function psComputeLayout(count, sz, imgAspect){
 
   // 10-PACK: three-tier (4 rear + 3 middle + 3 front)
   else if (count === 10) {
-    const rearW = sz * 0.2;
+    let rearW = sz * 0.2;
     let rearH = rearW / imgAspect;
-    const midW = sz * 0.24;
+    let midW = sz * 0.24;
     let midH = midW / imgAspect;
-    const frontW = sz * 0.26;
+    let frontW = sz * 0.26;
     let frontH = frontW / imgAspect;
     const gap = 10;
 
@@ -2825,11 +2825,11 @@ function psComputeLayout(count, sz, imgAspect){
 
   // 11-PACK: three-tier (4 rear + 4 middle + 3 front)
   else if (count === 11) {
-    const rearW = sz * 0.2;
+    let rearW = sz * 0.2;
     let rearH = rearW / imgAspect;
-    const midW = sz * 0.21;
+    let midW = sz * 0.21;
     let midH = midW / imgAspect;
-    const frontW = sz * 0.25;
+    let frontW = sz * 0.25;
     let frontH = frontW / imgAspect;
     const gap = 10;
 
@@ -2867,11 +2867,11 @@ function psComputeLayout(count, sz, imgAspect){
 
   // 12-PACK: three-tier (4 rear + 4 middle + 4 front)
   else if (count === 12) {
-    const rearW = sz * 0.2;
+    let rearW = sz * 0.2;
     let rearH = rearW / imgAspect;
-    const midW = sz * 0.21;
+    let midW = sz * 0.21;
     let midH = midW / imgAspect;
-    const frontW = sz * 0.22;
+    let frontW = sz * 0.22;
     let frontH = frontW / imgAspect;
     const gap = 10;
 
