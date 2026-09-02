@@ -2467,49 +2467,470 @@ async function normalize1200x1200(src) {
 // Calcula el mejor acomodo (columnas/filas) para `count` copias de una foto
 // dentro de un canvas cuadrado de tamaño `sz`, dado el aspect ratio de la foto.
 function psComputeLayout(count, sz, imgAspect){
+  // 1-pack: unchanged commercial layout
   if (count === 1) {
     const h = sz*.95, w = h*imgAspect;
     let s = 1; if (w > sz*.95) s = (sz*.95)/w;
     return [{x:sz/2, y:sz/2, w:w*s, h:h*s}];
   }
-  const maxFill = 0.97, gapPct = 0.01;
-  let minCols, maxCols;
-  if (count === 2) { minCols=2; maxCols=2; }
-  else if (count === 3) { minCols=3; maxCols=3; }
-  else if (count === 4) { minCols=2; maxCols=4; }
-  else if (count <= 6) { minCols=2; maxCols=Math.min(count,6); }
-  else if (count <= 10) { minCols=3; maxCols=Math.min(count,5); }
-  else { minCols=3; maxCols=Math.min(count,6); }
 
-  let bestCols=minCols, bestArea=0, bestProdW=0, bestProdH=0;
-  for (let cols=minCols; cols<=maxCols; cols++) {
-    const rows = Math.ceil(count/cols);
-    const availW = sz*maxFill - sz*gapPct*(cols-1);
-    const availH = sz*maxFill - sz*gapPct*(rows-1);
-    const cellW = availW/cols, cellH = availH/rows;
-    let pw, ph2;
-    const cellAspect = cellW/cellH;
-    if (imgAspect >= cellAspect) { pw=cellW; ph2=cellW/imgAspect; }
-    else { ph2=cellH; pw=cellH*imgAspect; }
-    const area = pw*ph2;
-    if (area > bestArea) { bestArea=area; bestCols=cols; bestProdW=pw; bestProdH=ph2; }
-  }
-  const co=bestCols, ar=Math.ceil(count/co), gap=sz*gapPct;
+  // Aspect ratio categories
+  const isWide = imgAspect > 1.6;
+  const isTall = imgAspect < 0.75;
+
+  const safeMargin = 30;
   const positions = [];
-  for (let i=0; i<count; i++) {
-    const rw=Math.floor(i/co), cl=i%co;
-    const ir = rw===ar-1 ? count-rw*co : co;
-    const rowW = ir*bestProdW + (ir-1)*gap;
-    const ox = (sz-rowW)/2;
-    const totalH = ar*bestProdH + (ar-1)*gap;
-    const oy = (sz-totalH)/2;
-    positions.push({
-      x: ox+cl*(bestProdW+gap)+bestProdW/2,
-      y: oy+rw*(bestProdH+gap)+bestProdH/2,
-      w: bestProdW, h: bestProdH
-    });
+
+  // Helper: Create tier with products positioned horizontally
+  function addTier(itemCount, tierY, baseWidth, tierScale, gap) {
+    const itemW = baseWidth * tierScale;
+    let itemH = itemW / imgAspect;
+
+    // For tall products, constrain height to tier spacing
+    const maxTierH = tierY === 280 ? 160 : (tierY === 600 ? 140 : 120);
+    if (itemH > maxTierH && isTall) {
+      itemH = maxTierH * 0.8;
+      itemW = itemH * imgAspect;
+    }
+
+    const tierW = itemCount * itemW + (itemCount - 1) * gap;
+    const startX = (sz - tierW) / 2 + itemW / 2;
+
+    for (let i = 0; i < itemCount; i++) {
+      const x = startX + i * (itemW + gap);
+      positions.push({
+        x: Math.max(safeMargin + itemW/2, Math.min(x, sz - safeMargin - itemW/2)),
+        y: tierY,
+        w: itemW,
+        h: itemH
+      });
+    }
   }
-  return positions;
+
+  // Helper: Constrain height for tall products
+  function constrainHeight(w, h, maxH) {
+    if (h > maxH) {
+      const scale = maxH / h;
+      h = maxH;
+      w = w * scale;
+    }
+    return {w, h};
+  }
+
+  // 2-PACK: diagonal overlap, rear upper-left, front lower-right
+  if (count === 2) {
+    const rearW = isWide ? sz * 0.3 : sz * 0.35;
+    let rearH = rearW / imgAspect;
+    const frontW = isWide ? sz * 0.35 : sz * 0.4;
+    let frontH = frontW / imgAspect;
+
+    // Constrain to max height
+    let adj = constrainHeight(rearW, rearH, 300);
+    rearW = adj.w;
+    rearH = adj.h;
+    adj = constrainHeight(frontW, frontH, 350);
+    frontW = adj.w;
+    frontH = adj.h;
+
+    positions.push({x: 350, y: 380, w: rearW, h: rearH});   // rear-left
+    positions.push({x: 800, y: 680, w: frontW, h: frontH}); // front-right
+  }
+
+  // 3-PACK: pyramid - two rear + one large front-center
+  else if (count === 3) {
+    const rearW = isWide ? sz * 0.26 : sz * 0.32;
+    let rearH = rearW / imgAspect;
+    const frontW = isWide ? sz * 0.36 : sz * 0.42;
+    let frontH = frontW / imgAspect;
+
+    // Constrain heights
+    let adj = constrainHeight(rearW, rearH, 280);
+    rearW = adj.w;
+    rearH = adj.h;
+    adj = constrainHeight(frontW, frontH, 400);
+    frontW = adj.w;
+    frontH = adj.h;
+
+    const gap = 25;
+    const tierW = rearW * 2 + gap;
+    const startX = (sz - tierW) / 2 + rearW / 2;
+
+    positions.push({x: startX, y: 320, w: rearW, h: rearH});
+    positions.push({x: startX + rearW + gap, y: 320, w: rearW, h: rearH});
+    positions.push({x: sz/2, y: 720, w: frontW, h: frontH});
+  }
+
+  // 4-PACK: two-tier (2 rear + 2 front)
+  else if (count === 4) {
+    const gap = 25;
+    const rearW = sz * 0.32;
+    let rearH = rearW / imgAspect;
+    const frontW = sz * 0.35;
+    let frontH = frontW / imgAspect;
+
+    // Constrain heights
+    let adj = constrainHeight(rearW, rearH, 280);
+    rearW = adj.w;
+    rearH = adj.h;
+    adj = constrainHeight(frontW, frontH, 280);
+    frontW = adj.w;
+    frontH = adj.h;
+
+    const tierW = rearW * 2 + gap;
+    const startX = (sz - tierW) / 2 + rearW / 2;
+
+    // Rear tier
+    for (let i = 0; i < 2; i++) {
+      const x = startX + i * (rearW + gap);
+      positions.push({x, y: 330, w: rearW, h: rearH});
+    }
+    // Front tier
+    for (let i = 0; i < 2; i++) {
+      const x = startX + i * (rearW + gap);
+      positions.push({x, y: 750, w: frontW, h: frontH});
+    }
+  }
+
+  // 5-PACK: three-tier (2 rear + 1 middle + 2 front)
+  else if (count === 5) {
+    const rearW = sz * 0.28;
+    let rearH = rearW / imgAspect;
+    const midW = sz * 0.36;
+    let midH = midW / imgAspect;
+    const frontW = sz * 0.3;
+    let frontH = frontW / imgAspect;
+    const gap = 20;
+
+    // Constrain heights
+    let adj = constrainHeight(rearW, rearH, 250);
+    rearW = adj.w;
+    rearH = adj.h;
+    adj = constrainHeight(midW, midH, 280);
+    midW = adj.w;
+    midH = adj.h;
+    adj = constrainHeight(frontW, frontH, 250);
+    frontW = adj.w;
+    frontH = adj.h;
+
+    // Rear tier (2)
+    const rearTW = rearW * 2 + gap;
+    const rearSX = (sz - rearTW) / 2 + rearW / 2;
+    for (let i = 0; i < 2; i++) {
+      positions.push({x: rearSX + i * (rearW + gap), y: 280, w: rearW, h: rearH});
+    }
+
+    // Middle tier (1)
+    positions.push({x: sz/2, y: 560, w: midW, h: midH});
+
+    // Front tier (2)
+    const frontTW = frontW * 2 + gap;
+    const frontSX = (sz - frontTW) / 2 + frontW / 2;
+    for (let i = 0; i < 2; i++) {
+      positions.push({x: frontSX + i * (frontW + gap), y: 850, w: frontW, h: frontH});
+    }
+  }
+
+  // 6-PACK: two-tier (3 rear + 3 front)
+  else if (count === 6) {
+    const rearW = sz * 0.25;
+    let rearH = rearW / imgAspect;
+    const frontW = sz * 0.28;
+    let frontH = frontW / imgAspect;
+    const gap = 15;
+
+    // Constrain heights
+    let adj = constrainHeight(rearW, rearH, 250);
+    rearW = adj.w;
+    rearH = adj.h;
+    adj = constrainHeight(frontW, frontH, 250);
+    frontW = adj.w;
+    frontH = adj.h;
+
+    const rearTW = rearW * 3 + gap * 2;
+    const rearSX = (sz - rearTW) / 2 + rearW / 2;
+
+    // Rear tier
+    for (let i = 0; i < 3; i++) {
+      positions.push({x: rearSX + i * (rearW + gap), y: 330, w: rearW, h: rearH});
+    }
+
+    // Front tier
+    for (let i = 0; i < 3; i++) {
+      positions.push({x: rearSX + i * (rearW + gap), y: 800, w: frontW, h: frontH});
+    }
+  }
+
+  // 7-PACK: three-tier (3 rear + 2 middle + 2 front)
+  else if (count === 7) {
+    const rearW = sz * 0.23;
+    let rearH = rearW / imgAspect;
+    const midW = sz * 0.27;
+    let midH = midW / imgAspect;
+    const frontW = sz * 0.3;
+    let frontH = frontW / imgAspect;
+    const gap = 12;
+
+    let adj = constrainHeight(rearW, rearH, 230);
+    rearW = adj.w;
+    rearH = adj.h;
+    adj = constrainHeight(midW, midH, 220);
+    midW = adj.w;
+    midH = adj.h;
+    adj = constrainHeight(frontW, frontH, 220);
+    frontW = adj.w;
+    frontH = adj.h;
+
+    // Rear tier (3)
+    const rearTW = rearW * 3 + gap * 2;
+    const rearSX = (sz - rearTW) / 2 + rearW / 2;
+    for (let i = 0; i < 3; i++) {
+      positions.push({x: rearSX + i * (rearW + gap), y: 270, w: rearW, h: rearH});
+    }
+
+    // Middle tier (2)
+    const midTW = midW * 2 + gap;
+    const midSX = (sz - midTW) / 2 + midW / 2;
+    for (let i = 0; i < 2; i++) {
+      positions.push({x: midSX + i * (midW + gap), y: 570, w: midW, h: midH});
+    }
+
+    // Front tier (2)
+    const frontTW = frontW * 2 + gap;
+    const frontSX = (sz - frontTW) / 2 + frontW / 2;
+    for (let i = 0; i < 2; i++) {
+      positions.push({x: frontSX + i * (frontW + gap), y: 880, w: frontW, h: frontH});
+    }
+  }
+
+  // 8-PACK: three-tier (3 rear + 3 middle + 2 front)
+  else if (count === 8) {
+    const rearW = sz * 0.23;
+    let rearH = rearW / imgAspect;
+    const midW = sz * 0.25;
+    let midH = midW / imgAspect;
+    const frontW = sz * 0.3;
+    let frontH = frontW / imgAspect;
+    const gap = 12;
+
+    let adj = constrainHeight(rearW, rearH, 220);
+    rearW = adj.w;
+    rearH = adj.h;
+    adj = constrainHeight(midW, midH, 210);
+    midW = adj.w;
+    midH = adj.h;
+    adj = constrainHeight(frontW, frontH, 210);
+    frontW = adj.w;
+    frontH = adj.h;
+
+    // Rear tier (3)
+    const rearTW = rearW * 3 + gap * 2;
+    const rearSX = (sz - rearTW) / 2 + rearW / 2;
+    for (let i = 0; i < 3; i++) {
+      positions.push({x: rearSX + i * (rearW + gap), y: 250, w: rearW, h: rearH});
+    }
+
+    // Middle tier (3)
+    const midTW = midW * 3 + gap * 2;
+    const midSX = (sz - midTW) / 2 + midW / 2;
+    for (let i = 0; i < 3; i++) {
+      positions.push({x: midSX + i * (midW + gap), y: 570, w: midW, h: midH});
+    }
+
+    // Front tier (2)
+    const frontTW = frontW * 2 + gap;
+    const frontSX = (sz - frontTW) / 2 + frontW / 2;
+    for (let i = 0; i < 2; i++) {
+      positions.push({x: frontSX + i * (frontW + gap), y: 900, w: frontW, h: frontH});
+    }
+  }
+
+  // 9-PACK: three-tier (3 rear + 3 middle + 3 front)
+  else if (count === 9) {
+    const rearW = sz * 0.23;
+    let rearH = rearW / imgAspect;
+    const midW = sz * 0.25;
+    let midH = midW / imgAspect;
+    const frontW = sz * 0.26;
+    let frontH = frontW / imgAspect;
+    const gap = 12;
+
+    let adj = constrainHeight(rearW, rearH, 220);
+    rearW = adj.w;
+    rearH = adj.h;
+    adj = constrainHeight(midW, midH, 200);
+    midW = adj.w;
+    midH = adj.h;
+    adj = constrainHeight(frontW, frontH, 200);
+    frontW = adj.w;
+    frontH = adj.h;
+
+    const tierTW = rearW * 3 + gap * 2;
+    const tierSX = (sz - tierTW) / 2 + rearW / 2;
+
+    // Rear tier
+    for (let i = 0; i < 3; i++) {
+      positions.push({x: tierSX + i * (rearW + gap), y: 270, w: rearW, h: rearH});
+    }
+    // Middle tier
+    for (let i = 0; i < 3; i++) {
+      positions.push({x: tierSX + i * (rearW + gap), y: 600, w: midW, h: midH});
+    }
+    // Front tier
+    for (let i = 0; i < 3; i++) {
+      positions.push({x: tierSX + i * (rearW + gap), y: 920, w: frontW, h: frontH});
+    }
+  }
+
+  // 10-PACK: three-tier (4 rear + 3 middle + 3 front)
+  else if (count === 10) {
+    const rearW = sz * 0.2;
+    let rearH = rearW / imgAspect;
+    const midW = sz * 0.24;
+    let midH = midW / imgAspect;
+    const frontW = sz * 0.26;
+    let frontH = frontW / imgAspect;
+    const gap = 10;
+
+    let adj = constrainHeight(rearW, rearH, 210);
+    rearW = adj.w;
+    rearH = adj.h;
+    adj = constrainHeight(midW, midH, 200);
+    midW = adj.w;
+    midH = adj.h;
+    adj = constrainHeight(frontW, frontH, 200);
+    frontW = adj.w;
+    frontH = adj.h;
+
+    // Rear tier (4)
+    const rearTW = rearW * 4 + gap * 3;
+    const rearSX = (sz - rearTW) / 2 + rearW / 2;
+    for (let i = 0; i < 4; i++) {
+      positions.push({x: rearSX + i * (rearW + gap), y: 240, w: rearW, h: rearH});
+    }
+
+    // Middle tier (3)
+    const midTW = midW * 3 + gap * 2;
+    const midSX = (sz - midTW) / 2 + midW / 2;
+    for (let i = 0; i < 3; i++) {
+      positions.push({x: midSX + i * (midW + gap), y: 600, w: midW, h: midH});
+    }
+
+    // Front tier (3)
+    const frontTW = frontW * 3 + gap * 2;
+    const frontSX = (sz - frontTW) / 2 + frontW / 2;
+    for (let i = 0; i < 3; i++) {
+      positions.push({x: frontSX + i * (frontW + gap), y: 920, w: frontW, h: frontH});
+    }
+  }
+
+  // 11-PACK: three-tier (4 rear + 4 middle + 3 front)
+  else if (count === 11) {
+    const rearW = sz * 0.2;
+    let rearH = rearW / imgAspect;
+    const midW = sz * 0.21;
+    let midH = midW / imgAspect;
+    const frontW = sz * 0.25;
+    let frontH = frontW / imgAspect;
+    const gap = 10;
+
+    let adj = constrainHeight(rearW, rearH, 200);
+    rearW = adj.w;
+    rearH = adj.h;
+    adj = constrainHeight(midW, midH, 190);
+    midW = adj.w;
+    midH = adj.h;
+    adj = constrainHeight(frontW, frontH, 190);
+    frontW = adj.w;
+    frontH = adj.h;
+
+    // Rear tier (4)
+    const rearTW = rearW * 4 + gap * 3;
+    const rearSX = (sz - rearTW) / 2 + rearW / 2;
+    for (let i = 0; i < 4; i++) {
+      positions.push({x: rearSX + i * (rearW + gap), y: 220, w: rearW, h: rearH});
+    }
+
+    // Middle tier (4)
+    const midTW = midW * 4 + gap * 3;
+    const midSX = (sz - midTW) / 2 + midW / 2;
+    for (let i = 0; i < 4; i++) {
+      positions.push({x: midSX + i * (midW + gap), y: 580, w: midW, h: midH});
+    }
+
+    // Front tier (3)
+    const frontTW = frontW * 3 + gap * 2;
+    const frontSX = (sz - frontTW) / 2 + frontW / 2;
+    for (let i = 0; i < 3; i++) {
+      positions.push({x: frontSX + i * (frontW + gap), y: 920, w: frontW, h: frontH});
+    }
+  }
+
+  // 12-PACK: three-tier (4 rear + 4 middle + 4 front)
+  else if (count === 12) {
+    const rearW = sz * 0.2;
+    let rearH = rearW / imgAspect;
+    const midW = sz * 0.21;
+    let midH = midW / imgAspect;
+    const frontW = sz * 0.22;
+    let frontH = frontW / imgAspect;
+    const gap = 10;
+
+    let adj = constrainHeight(rearW, rearH, 210);
+    rearW = adj.w;
+    rearH = adj.h;
+    adj = constrainHeight(midW, midH, 190);
+    midW = adj.w;
+    midH = adj.h;
+    adj = constrainHeight(frontW, frontH, 190);
+    frontW = adj.w;
+    frontH = adj.h;
+
+    const tierTW = rearW * 4 + gap * 3;
+    const tierSX = (sz - tierTW) / 2 + rearW / 2;
+
+    // Rear tier
+    for (let i = 0; i < 4; i++) {
+      positions.push({x: tierSX + i * (rearW + gap), y: 240, w: rearW, h: rearH});
+    }
+    // Middle tier
+    for (let i = 0; i < 4; i++) {
+      positions.push({x: tierSX + i * (rearW + gap), y: 600, w: midW, h: midH});
+    }
+    // Front tier
+    for (let i = 0; i < 4; i++) {
+      positions.push({x: tierSX + i * (rearW + gap), y: 960, w: frontW, h: frontH});
+    }
+  }
+
+  // Bounds enforcement: ensure no product escapes canvas
+  return positions.map(p => {
+    let {x, y, w, h} = p;
+    const left = x - w / 2;
+    const right = x + w / 2;
+    const top = y - h / 2;
+    const bottom = y + h / 2;
+
+    // If overflow detected, scale down uniformly while preserving aspect ratio
+    if (left < safeMargin || right > sz - safeMargin || top < safeMargin || bottom > sz - safeMargin) {
+      const horizOverflow = Math.max(0, left - safeMargin, right - (sz - safeMargin));
+      const vertOverflow = Math.max(0, top - safeMargin, bottom - (sz - safeMargin));
+
+      if (horizOverflow > 0) {
+        const scale = (sz - safeMargin * 2) / (right - left);
+        w *= scale;
+        h *= scale;
+        x = sz / 2; // re-center horizontally
+      }
+      if (vertOverflow > 0) {
+        const scale = (sz - safeMargin * 2) / (bottom - top);
+        w *= scale;
+        h *= scale;
+        y = sz / 2; // re-center vertically
+      }
+    }
+
+    return {x, y, w, h};
+  });
 }
 
 // Dibuja el distintivo circular "N Pack" — igual al de la herramienta de Manuel
