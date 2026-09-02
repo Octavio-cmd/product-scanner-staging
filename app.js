@@ -3658,10 +3658,10 @@ async function _doAnalyze(upc){
       const avgTotal = rwData.ebay_avg || total;
       if (total > 0) {
         ebayFull.found = true;
-        ebayFull.prices = { low: total, avg: avgTotal };
+        ebayFull.prices = { low: total, avg: avgTotal, high: rwData.max_price || 0 };
         ebayFull.pricing = { sold: { avg: 0, count: 0 }, active: { low: total, avg: avgTotal } };
         ebayFull.topTitles = [prod.name];
-        ebayFull.activeListings = rwData.sellers_count || 0;
+        ebayFull.activeListings = rwData.active_bin_count || 0;
       }
       if (rwData.category) {
         ebayFull.category = rwData.category;
