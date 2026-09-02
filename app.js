@@ -7292,7 +7292,7 @@ async function exportCSV(){
     // ── Item specifics generados por IA (columnas comunes) ──
     'C:Size','C:Volume','C:Scent','C:Flavor','C:Formulation','C:Active Ingredients','C:Ingredients',
     'C:Features','C:Material','C:Number of Doses','C:Suitable For',
-    'C:Fragrance','C:Item Form','C:Country/Region of Manufacture',
+    'C:Fragrance','C:Item Form','C:Country of Origin',
     'C:Main Purpose','C:Age Group','C:Department',
     'C:MPN','C:Period After Opening (PAO)','C:Styling Effect','C:Product Line','C:Item Weight','C:Size Type','C:When to Take',
     'WeightMajor','WeightMinor'
@@ -7318,7 +7318,7 @@ async function exportCSV(){
     'Dosage':'C:Dosage',
     'Suitable For':'C:Suitable For', 'For Pet Type':'C:Suitable For', 'Hair Type':'C:Suitable For', 'Skin Type':'C:Suitable For',
     'Fragrance':'C:Fragrance',
-    'Country/Region of Manufacture':'C:Country/Region of Manufacture', 'Country of Origin':'C:Country/Region of Manufacture',
+    'Country/Region of Manufacture':'C:Country of Origin', 'Country of Origin':'C:Country of Origin',
     'Main Purpose':'C:Main Purpose', 'Body Area':'C:Main Purpose', 'Type of Product':'C:Main Purpose',
     'Age Group':'C:Age Group',
     'Department':'C:Department',
@@ -7330,7 +7330,7 @@ async function exportCSV(){
     'Size Type':'C:Size Type',
     'When to Take':'C:When to Take'
   };
-  var SPEC_COLS = ['C:Size','C:Volume','C:Scent','C:Flavor','C:Formulation','C:Active Ingredients','C:Ingredients','C:Features','C:Material','C:Number of Doses','C:Suitable For','C:Fragrance','C:Item Form','C:Country/Region of Manufacture','C:Main Purpose','C:Age Group','C:Department'];
+  var SPEC_COLS = ['C:Size','C:Volume','C:Scent','C:Flavor','C:Formulation','C:Active Ingredients','C:Ingredients','C:Features','C:Material','C:Number of Doses','C:Suitable For','C:Fragrance','C:Item Form','C:Country of Origin','C:Main Purpose','C:Age Group','C:Department'];
 
   var lines = ['Info,Version=1.0.0,Template=fx_category_template_EBAY_US', HDR.join(',')];
   var skipped = 0;
@@ -8129,7 +8129,7 @@ async function exportCSV(){
       _specForCol('C:Suitable For'),
       _specForCol('C:Fragrance'),
       itemFormVal,
-      _specForCol('C:Country/Region of Manufacture'),
+      _specForCol('C:Country of Origin'),
       _specForCol('C:Main Purpose'),
       ageGroupVal,
       departmentVal,
