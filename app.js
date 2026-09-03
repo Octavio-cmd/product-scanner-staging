@@ -2464,6 +2464,161 @@ async function normalize1200x1200(src) {
   });
 }
 
+// ───────────────────────────────────────────────────────────────────────────
+// MULTIPACK VISIBLE BOUNDS + FORMATTING
+// ───────────────────────────────────────────────────────────────────────────
+
+function fmtNumber(value, digits = 3) {
+  return Number.isFinite(value) ? Number(value).toFixed(digits) : '0.000';
+}
+
+let visibleBoundsCache = null;
+let visibleBoundsCacheKey = null;
+
+function psGetVisibleImageBounds(img){
+  if (visibleBoundsCacheKey === img.src && visibleBoundsCache) {
+    console.log('📊 Using cached visible bounds');
+    return visibleBoundsCache;
+  }
+
+  try {
+    console.log('📊 Analyzing visible bounds for ' + img.width + '×' + img.height);
+
+    const MAX_ANALYSIS_DIM = 512;
+    const scale = Math.min(1, MAX_ANALYSIS_DIM / Math.max(img.width, img.height));
+    const analysisW = Math.round(img.width * scale);
+    const analysisH = Math.round(img.height * scale);
+    const invScale = 1 / scale;
+
+    console.log('📊 Analysis scale: ' + scale.toFixed(3) + ' (' + analysisW + '×' + analysisH + ')');
+
+    const analysisCanvas = document.createElement('canvas');
+    analysisCanvas.width = analysisW;
+    analysisCanvas.height = analysisH;
+    const analysisCtx = analysisCanvas.getContext('2d');
+    analysisCtx.drawImage(img, 0, 0, analysisW, analysisH);
+
+    console.log('📊 Analysis canvas created');
+
+    const imageData = analysisCtx.getImageData(0, 0, analysisW, analysisH);
+    const data = imageData.data;
+
+    console.log('📊 Image data extracted, scanning ' + (analysisW * analysisH) + ' pixels');
+
+    let analysisLeft = analysisW;
+    let analysisTop = analysisH;
+    let analysisRight = 0;
+    let analysisBottom = 0;
+
+    const alphaThreshold = 8;
+    let hasVisiblePixels = false;
+
+    for (let i = 3; i < data.length; i += 4) {
+      if (data[i] > alphaThreshold) {
+        hasVisiblePixels = true;
+        const pixelIndex = (i - 3) / 4;
+        const y = Math.floor(pixelIndex / analysisW);
+        const x = pixelIndex % analysisW;
+
+        if (x < analysisLeft) analysisLeft = x;
+        if (x > analysisRight) analysisRight = x;
+        if (y < analysisTop) analysisTop = y;
+        if (y > analysisBottom) analysisBottom = y;
+      }
+    }
+
+    console.log('📊 Alpha scan complete, hasVisiblePixels=' + hasVisiblePixels);
+
+    let visibleLeft, visibleTop, visibleRight, visibleBottom;
+
+    if (!hasVisiblePixels) {
+      visibleLeft = 0;
+      visibleTop = 0;
+      visibleRight = img.width - 1;
+      visibleBottom = img.height - 1;
+      console.log('📊 No transparent pixels, using full image');
+    } else {
+      visibleLeft = Math.round(analysisLeft * invScale);
+      visibleTop = Math.round(analysisTop * invScale);
+      visibleRight = Math.round(analysisRight * invScale);
+      visibleBottom = Math.round(analysisBottom * invScale);
+    }
+
+    const padWidth = (visibleRight - visibleLeft) * 0.03;
+    const padHeight = (visibleBottom - visibleTop) * 0.03;
+
+    visibleLeft = Math.max(0, Math.floor(visibleLeft - padWidth));
+    visibleTop = Math.max(0, Math.floor(visibleTop - padHeight));
+    visibleRight = Math.min(img.width - 1, Math.ceil(visibleRight + padWidth));
+    visibleBottom = Math.min(img.height - 1, Math.ceil(visibleBottom + padHeight));
+
+    const visibleWidth = visibleRight - visibleLeft + 1;
+    const visibleHeight = visibleBottom - visibleTop + 1;
+    const visibleAspect = visibleWidth / visibleHeight;
+
+    const totalWidth = img.width;
+    const totalHeight = img.height;
+    const padLeftPct = (visibleLeft / totalWidth) * 100;
+    const padRightPct = ((totalWidth - visibleRight - 1) / totalWidth) * 100;
+    const padTopPct = (visibleTop / totalHeight) * 100;
+    const padBottomPct = ((totalHeight - visibleBottom - 1) / totalHeight) * 100;
+
+    const sourceAspectRatio = img.width / img.height;
+
+    const bounds = {
+      left: visibleLeft,
+      top: visibleTop,
+      width: visibleWidth,
+      height: visibleHeight,
+      aspect: visibleAspect,
+      sourceAspect: sourceAspectRatio,
+      sourceW: img.width,
+      sourceH: img.height,
+      padding: {
+        leftPct: padLeftPct,
+        rightPct: padRightPct,
+        topPct: padTopPct,
+        bottomPct: padBottomPct
+      },
+      hasTransparency: hasVisiblePixels,
+      usedFallback: false
+    };
+
+    console.log('📊 Bounds calculated: ' + visibleWidth + '×' + visibleHeight + ' aspect=' + fmtNumber(visibleAspect, 3));
+
+    visibleBoundsCache = bounds;
+    visibleBoundsCacheKey = img.src;
+
+    return bounds;
+  } catch (error) {
+    console.error('❌ Visible bounds analysis failed:', error.message);
+    console.error('   Stack:', error.stack);
+    const fallback = {
+      left: 0,
+      top: 0,
+      width: img.width,
+      height: img.height,
+      aspect: img.width / img.height,
+      sourceAspect: img.width / img.height,
+      sourceW: img.width,
+      sourceH: img.height,
+      padding: {
+        leftPct: 0,
+        rightPct: 0,
+        topPct: 0,
+        bottomPct: 0
+      },
+      hasTransparency: false,
+      usedFallback: true,
+      error: error.message
+    };
+    console.log('📊 Using fallback bounds (full image)');
+    visibleBoundsCache = fallback;
+    visibleBoundsCacheKey = img.src;
+    return fallback;
+  }
+}
+
 // Calcula el mejor acomodo (columnas/filas) para `count` copias de una foto
 // dentro de un canvas cuadrado de tamaño `sz`, dado el aspect ratio de la foto.
 function psComputeLayout(count, sz, imgAspect){
@@ -2951,13 +3106,42 @@ function psDrawBadge(ctx, count, sz){
 
 // Genera la imagen del paquete: `count` copias de `img` + distintivo (si count>1)
 function psGeneratePackImage(img, count){
-  const sz=1200, cv=document.createElement('canvas'); cv.width=sz; cv.height=sz;
-  const cx=cv.getContext('2d'); cx.imageSmoothingEnabled=true; cx.imageSmoothingQuality='high';
-  cx.fillStyle='#FFF'; cx.fillRect(0,0,sz,sz);
-  const positions = psComputeLayout(count, sz, img.width/img.height);
-  positions.forEach(p => cx.drawImage(img, p.x-p.w/2, p.y-p.h/2, p.w, p.h));
-  if (count > 1) psDrawBadge(cx, count, sz);
-  return cv.toDataURL('image/jpeg', .92);
+  try {
+    console.log('🎨 psGeneratePackImage start, count=' + count);
+    const sz=1200, cv=document.createElement('canvas'); cv.width=sz; cv.height=sz;
+    const cx=cv.getContext('2d'); cx.imageSmoothingEnabled=true; cx.imageSmoothingQuality='high';
+    cx.fillStyle='#FFF'; cx.fillRect(0,0,sz,sz);
+
+    console.log('🎨 Getting visible bounds (cached if available)');
+    const visibleBounds = psGetVisibleImageBounds(img);
+    console.log('🎨 Computing layout with aspect ' + visibleBounds.aspect.toFixed(3));
+    const positions = psComputeLayout(count, sz, visibleBounds.aspect);
+
+    console.log('🎨 Drawing ' + positions.length + ' product instances');
+    positions.forEach((p, idx) => {
+      cx.drawImage(
+        img,
+        visibleBounds.left,
+        visibleBounds.top,
+        visibleBounds.width,
+        visibleBounds.height,
+        p.x - p.w/2,
+        p.y - p.h/2,
+        p.w,
+        p.h
+      );
+    });
+
+    if (count > 1) {
+      console.log('🎨 Drawing badge');
+      psDrawBadge(cx, count, sz);
+    }
+    console.log('🎨 psGeneratePackImage complete for count=' + count);
+    return cv.toDataURL('image/jpeg', .92);
+  } catch (error) {
+    console.error('❌ psGeneratePackImage error:', error, 'count=' + count);
+    throw error;
+  }
 }
 
 // Genera la foto secundaria (BACK) centrada sola, sin distintivo, sin duplicar
