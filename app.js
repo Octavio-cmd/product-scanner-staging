@@ -2148,14 +2148,22 @@ async function _uploadToImgBB(dataUrl, key, slotName) {
 // ── Pipeline compartido: comprimir → quitar fondo (Railway rembg) → subir a ImgBB ──
 // Usado por FRONT, BACK, y las fotos extra opcionales — mismo proceso para todas.
 async function clRemoveBackground(file, onStatus){
+  // PERFORMANCE INSTRUMENTATION
+  const perfStart = performance.now();
+  const perfMarks = {};
+
   // El servidor reduce la entrada a 1600px de todas formas (rembg calcula la
   // mascara a 320x320 internamente), asi que mandar mas es puro peso de red
   // sin ninguna mejora en el recorte. 1600 @ 0.90 baja la subida de ~3 MB a
   // unos 500 KB por foto.
   if(onStatus) onStatus('Comprimiendo...');
+  perfMarks.compressStart = performance.now();
   var dataUrl = await clCompressImage(file, 1600, 0.90);
+  perfMarks.compressEnd = performance.now();
+  console.log('[PERF][PHOTO] initial-compress: ' + Math.round(perfMarks.compressEnd - perfMarks.compressStart) + ' ms');
 
   if(onStatus) onStatus('🚂 Quitando fondo...');
+  perfMarks.rbgReqStart = performance.now();
   const RAILWAY_RBG = 'https://savvy-rembg-production.up.railway.app/remove-bg';
   const b64 = dataUrl.split(',')[1];
   const rbgRes = await fetch(RAILWAY_RBG, {
@@ -2167,8 +2175,15 @@ async function clRemoveBackground(file, onStatus){
     // final, una decima parte del peso.
     body: JSON.stringify({ image: b64, format: 'jpeg', quality: 92 })
   });
+  perfMarks.rbgReqEnd = performance.now();
+  console.log('[PERF][PHOTO] remove-bg-request: ' + Math.round(perfMarks.rbgReqEnd - perfMarks.rbgReqStart) + ' ms');
+
   if(!rbgRes.ok) throw new Error('Railway rembg error ' + rbgRes.status);
+  perfMarks.rbgDecodeStart = performance.now();
   const rbgData = await rbgRes.json();
+  perfMarks.rbgDecodeEnd = performance.now();
+  console.log('[PERF][PHOTO] decode-result: ' + Math.round(perfMarks.rbgDecodeEnd - perfMarks.rbgDecodeStart) + ' ms');
+
   if(!rbgData.success || !rbgData.image) throw new Error('rembg no devolvió imagen');
 
   const isJpeg = (rbgData.mime === 'image/jpeg') || (rbgData.format === 'jpeg');
@@ -2181,9 +2196,13 @@ async function clRemoveBackground(file, onStatus){
   let cleanUrl;
   if (isJpeg) {
     if(onStatus) onStatus('🖼️ Listo...');
+    perfMarks.bgProcessStart = performance.now();
+    perfMarks.bgProcessEnd = performance.now();
+    console.log('[PERF][PHOTO] bg-process: ' + Math.round(perfMarks.bgProcessEnd - perfMarks.bgProcessStart) + ' ms (jpeg, no reprocessing)');
     cleanUrl = pngUrl;
   } else {
     if(onStatus) onStatus('🖼️ Procesando fondo...');
+    perfMarks.bgProcessStart = performance.now();
     cleanUrl = await new Promise(function(resolve) {
       var img = new Image();
       img.onload = function() {
@@ -2206,15 +2225,28 @@ async function clRemoveBackground(file, onStatus){
       img.onerror = function() { resolve(pngUrl); };
       img.src = pngUrl;
     });
+    perfMarks.bgProcessEnd = performance.now();
+    console.log('[PERF][PHOTO] bg-process: ' + Math.round(perfMarks.bgProcessEnd - perfMarks.bgProcessStart) + ' ms (png reprocessing)');
   }
 
   if(onStatus) onStatus('📤 Subiendo...');
+  perfMarks.uploadStart = performance.now();
   const imgbbKey = localStorage.getItem('savvy_imgbb_key') || DEFAULT_IMGBB_KEY;
   let finalUrl = cleanUrl;
   if (imgbbKey) {
     const uploaded = await clUploadPhotoToImgBB(cleanUrl, imgbbKey, 'photo');
     if (uploaded) finalUrl = uploaded;
   }
+  perfMarks.uploadEnd = performance.now();
+  console.log('[PERF][PHOTO] remote-upload: ' + Math.round(perfMarks.uploadEnd - perfMarks.uploadStart) + ' ms');
+
+  perfMarks.previewStart = performance.now();
+  perfMarks.previewEnd = performance.now();
+  console.log('[PERF][PHOTO] preview-render: ' + Math.round(perfMarks.previewEnd - perfMarks.previewStart) + ' ms');
+
+  const totalTime = performance.now() - perfStart;
+  console.log('[PERF][PHOTO] TOTAL: ' + Math.round(totalTime) + ' ms');
+
   return { finalUrl, localUrl: cleanUrl };
 }
 
@@ -2622,470 +2654,494 @@ function psGetVisibleImageBounds(img){
 // Calcula el mejor acomodo (columnas/filas) para `count` copias de una foto
 // dentro de un canvas cuadrado de tamaño `sz`, dado el aspect ratio de la foto.
 function psComputeLayout(count, sz, imgAspect){
-  // 1-pack: unchanged commercial layout
   if (count === 1) {
     const h = sz*.95, w = h*imgAspect;
     let s = 1; if (w > sz*.95) s = (sz*.95)/w;
     return [{x:sz/2, y:sz/2, w:w*s, h:h*s}];
   }
 
-  // Aspect ratio categories
   const isWide = imgAspect > 1.6;
   const isTall = imgAspect < 0.75;
+  const isStd = !isWide && !isTall;
 
   const safeMargin = 30;
-  const positions = [];
+  const eps = 0.5;
+  let positions = [];
 
-  // Helper: Create tier with products positioned horizontally
-  function addTier(itemCount, tierY, baseWidth, tierScale, gap) {
-    const itemW = baseWidth * tierScale;
-    let itemH = itemW / imgAspect;
-
-    // For tall products, constrain height to tier spacing
-    const maxTierH = tierY === 280 ? 160 : (tierY === 600 ? 140 : 120);
-    if (itemH > maxTierH && isTall) {
-      itemH = maxTierH * 0.8;
-      itemW = itemH * imgAspect;
-    }
-
-    const tierW = itemCount * itemW + (itemCount - 1) * gap;
-    const startX = (sz - tierW) / 2 + itemW / 2;
-
+  // ========== ROW HELPER: Width-relative spacing ==========
+  const makeRow = (itemCount, centerX, y, unitW, unitH, spacingFactor, rowOffsetX = 0) => {
+    const spacing = unitW * spacingFactor;
+    const totalWidth = (itemCount - 1) * spacing + unitW;
+    const startX = centerX - totalWidth / 2 + rowOffsetX;
+    const row = [];
     for (let i = 0; i < itemCount; i++) {
-      const x = startX + i * (itemW + gap);
-      positions.push({
-        x: Math.max(safeMargin + itemW/2, Math.min(x, sz - safeMargin - itemW/2)),
-        y: tierY,
-        w: itemW,
-        h: itemH
+      row.push({
+        x: startX + i * spacing,
+        y: y,
+        w: unitW,
+        h: unitH
       });
     }
-  }
+    return row;
+  };
 
-  // Helper: Constrain height for tall products
-  function constrainHeight(w, h, maxH) {
-    if (h > maxH) {
-      const scale = maxH / h;
-      h = maxH;
-      w = w * scale;
-    }
-    return {w, h};
-  }
-
-  // 2-PACK: diagonal overlap, rear upper-left, front lower-right
   if (count === 2) {
-    let rearW = isWide ? sz * 0.3 : sz * 0.35;
-    let rearH = rearW / imgAspect;
-    let frontW = isWide ? sz * 0.35 : sz * 0.4;
-    let frontH = frontW / imgAspect;
-
-    // Constrain to max height
-    let adj = constrainHeight(rearW, rearH, 300);
-    rearW = adj.w;
-    rearH = adj.h;
-    adj = constrainHeight(frontW, frontH, 350);
-    frontW = adj.w;
-    frontH = adj.h;
-
-    positions.push({x: 350, y: 380, w: rearW, h: rearH});   // rear-left
-    positions.push({x: 800, y: 680, w: frontW, h: frontH}); // front-right
-  }
-
-  // 3-PACK: pyramid - two rear + one large front-center
-  else if (count === 3) {
-    let rearW = isWide ? sz * 0.26 : sz * 0.32;
-    let rearH = rearW / imgAspect;
-    let frontW = isWide ? sz * 0.36 : sz * 0.42;
-    let frontH = frontW / imgAspect;
-
-    // Constrain heights
-    let adj = constrainHeight(rearW, rearH, 280);
-    rearW = adj.w;
-    rearH = adj.h;
-    adj = constrainHeight(frontW, frontH, 400);
-    frontW = adj.w;
-    frontH = adj.h;
-
-    const gap = 25;
-    const tierW = rearW * 2 + gap;
-    const startX = (sz - tierW) / 2 + rearW / 2;
-
-    positions.push({x: startX, y: 320, w: rearW, h: rearH});
-    positions.push({x: startX + rearW + gap, y: 320, w: rearW, h: rearH});
-    positions.push({x: sz/2, y: 720, w: frontW, h: frontH});
-  }
-
-  // 4-PACK: two-tier (2 rear + 2 front)
-  else if (count === 4) {
-    const gap = 25;
-    let rearW = sz * 0.32;
-    let rearH = rearW / imgAspect;
-    let frontW = sz * 0.35;
-    let frontH = frontW / imgAspect;
-
-    // Constrain heights
-    let adj = constrainHeight(rearW, rearH, 280);
-    rearW = adj.w;
-    rearH = adj.h;
-    adj = constrainHeight(frontW, frontH, 280);
-    frontW = adj.w;
-    frontH = adj.h;
-
-    const tierW = rearW * 2 + gap;
-    const startX = (sz - tierW) / 2 + rearW / 2;
-
-    // Rear tier
-    for (let i = 0; i < 2; i++) {
-      const x = startX + i * (rearW + gap);
-      positions.push({x, y: 330, w: rearW, h: rearH});
+    if (isTall) {
+      const unitH = sz * 0.32;
+      const unitW = unitH * imgAspect;
+      // Spacing calculated from visible product dimensions
+      // 0.80 × unitW center distance = 20% overlap, 0.35 × unitH vertical offset
+      const horizDistance = unitW * 0.80;
+      const vertDistance = unitH * 0.35;
+      const centerX = 600;
+      const baseY = 430;
+      const rear_cx = centerX - horizDistance / 2;
+      const rear_cy = baseY - vertDistance / 2;
+      const front_cx = centerX + horizDistance / 2;
+      const front_cy = baseY + vertDistance / 2;
+      const rearRow = makeRow(1, rear_cx, rear_cy, unitW, unitH, 0);
+      const frontRow = makeRow(1, front_cx, front_cy, unitW, unitH, 0);
+      positions.push(...rearRow, ...frontRow);
+    } else if (isWide) {
+      const unitH = sz * 0.20;
+      const unitW = unitH * imgAspect;
+      // Spacing calculated from visible product dimensions
+      // 0.80 × unitW center distance = 20% overlap, 0.33 × unitH vertical offset
+      const horizDistance = unitW * 0.80;
+      const vertDistance = unitH * 0.33;
+      const centerX = 600;
+      const baseY = 420;
+      const rear_cx = centerX - horizDistance / 2;
+      const rear_cy = baseY - vertDistance / 2;
+      const front_cx = centerX + horizDistance / 2;
+      const front_cy = baseY + vertDistance / 2;
+      const rearRow = makeRow(1, rear_cx, rear_cy, unitW, unitH, 0);
+      const frontRow = makeRow(1, front_cx, front_cy, unitW, unitH, 0);
+      positions.push(...rearRow, ...frontRow);
+    } else {
+      const unitH = sz * 0.32;
+      const unitW = unitH * imgAspect;
+      // Spacing calculated from visible product dimensions
+      // 0.80 × unitW center distance = 20% overlap, 0.35 × unitH vertical offset
+      const horizDistance = unitW * 0.80;
+      const vertDistance = unitH * 0.35;
+      const centerX = 600;
+      const baseY = 430;
+      const rear_cx = centerX - horizDistance / 2;
+      const rear_cy = baseY - vertDistance / 2;
+      const front_cx = centerX + horizDistance / 2;
+      const front_cy = baseY + vertDistance / 2;
+      const rearRow = makeRow(1, rear_cx, rear_cy, unitW, unitH, 0);
+      const frontRow = makeRow(1, front_cx, front_cy, unitW, unitH, 0);
+      positions.push(...rearRow, ...frontRow);
     }
-    // Front tier
-    for (let i = 0; i < 2; i++) {
-      const x = startX + i * (rearW + gap);
-      positions.push({x, y: 750, w: frontW, h: frontH});
+  } else if (count === 3) {
+    if (isTall) {
+      const unitH = sz * 0.30;
+      const unitW = unitH * imgAspect;
+      // Rear 2: width-relative spacing
+      const rearRow = makeRow(2, 450, 340, unitW, unitH, 1.15);
+      // Front 1: centered
+      const frontRow = makeRow(1, 450, 480, unitW, unitH, 0);
+      positions.push(...rearRow, ...frontRow);
+    } else if (isWide) {
+      const unitH = sz * 0.18;
+      const unitW = unitH * imgAspect;
+      // Staggered diagonal: three individual items
+      positions.push({x: 320, y: 340, w: unitW, h: unitH});
+      positions.push({x: 420, y: 400, w: unitW, h: unitH});
+      positions.push({x: 520, y: 460, w: unitW, h: unitH});
+    } else {
+      const unitH = sz * 0.28;
+      const unitW = unitH * imgAspect;
+      // Rear 2: width-relative spacing
+      const rearRow = makeRow(2, 450, 340, unitW, unitH, 1.10);
+      // Front 1: centered
+      const frontRow = makeRow(1, 450, 480, unitW, unitH, 0);
+      positions.push(...rearRow, ...frontRow);
     }
-  }
-
-  // 5-PACK: three-tier (2 rear + 1 middle + 2 front)
-  else if (count === 5) {
-    let rearW = sz * 0.28;
-    let rearH = rearW / imgAspect;
-    let midW = sz * 0.36;
-    let midH = midW / imgAspect;
-    let frontW = sz * 0.3;
-    let frontH = frontW / imgAspect;
-    const gap = 20;
-
-    // Constrain heights
-    let adj = constrainHeight(rearW, rearH, 250);
-    rearW = adj.w;
-    rearH = adj.h;
-    adj = constrainHeight(midW, midH, 280);
-    midW = adj.w;
-    midH = adj.h;
-    adj = constrainHeight(frontW, frontH, 250);
-    frontW = adj.w;
-    frontH = adj.h;
-
-    // Rear tier (2)
-    const rearTW = rearW * 2 + gap;
-    const rearSX = (sz - rearTW) / 2 + rearW / 2;
-    for (let i = 0; i < 2; i++) {
-      positions.push({x: rearSX + i * (rearW + gap), y: 280, w: rearW, h: rearH});
+  } else if (count === 4) {
+    if (isTall) {
+      const unitH = sz * 0.27;
+      const unitW = unitH * imgAspect;
+      // Rear 2: width-relative spacing
+      const rearRow = makeRow(2, 425, 320, unitW, unitH, 1.0);
+      // Front 2: width-relative spacing
+      const frontRow = makeRow(2, 395, 470, unitW, unitH, 1.0);
+      positions.push(...rearRow, ...frontRow);
+    } else if (isWide) {
+      const unitH = sz * 0.16;
+      const unitW = unitH * imgAspect;
+      // Diagonal 2x2 with varied Y
+      positions.push({x: 320, y: 320, w: unitW, h: unitH});
+      positions.push({x: 420, y: 340, w: unitW, h: unitH});
+      positions.push({x: 340, y: 440, w: unitW, h: unitH});
+      positions.push({x: 440, y: 460, w: unitW, h: unitH});
+    } else {
+      const unitH = sz * 0.25;
+      const unitW = unitH * imgAspect;
+      // Rear 2: width-relative spacing
+      const rearRow = makeRow(2, 425, 320, unitW, unitH, 0.95);
+      // Front 2: width-relative spacing
+      const frontRow = makeRow(2, 395, 470, unitW, unitH, 0.95);
+      positions.push(...rearRow, ...frontRow);
     }
-
-    // Middle tier (1)
-    positions.push({x: sz/2, y: 560, w: midW, h: midH});
-
-    // Front tier (2)
-    const frontTW = frontW * 2 + gap;
-    const frontSX = (sz - frontTW) / 2 + frontW / 2;
-    for (let i = 0; i < 2; i++) {
-      positions.push({x: frontSX + i * (frontW + gap), y: 850, w: frontW, h: frontH});
+  } else if (count === 5) {
+    if (isTall) {
+      const unitH = sz * 0.24;
+      const unitW = unitH * imgAspect;
+      // Rear 3: width-relative spacing
+      const rearRow = makeRow(3, 420, 310, unitW, unitH, 0.95);
+      // Front 2: width-relative spacing, offset back
+      const frontRow = makeRow(2, 420, 470, unitW, unitH, 0.95);
+      positions.push(...rearRow, ...frontRow);
+    } else if (isWide) {
+      const unitH = sz * 0.15;
+      const unitW = unitH * imgAspect;
+      // Diagonal stagger: unique Y for each item
+      positions.push({x: 300, y: 310, w: unitW, h: unitH});
+      positions.push({x: 380, y: 340, w: unitW, h: unitH});
+      positions.push({x: 460, y: 370, w: unitW, h: unitH});
+      positions.push({x: 330, y: 450, w: unitW, h: unitH});
+      positions.push({x: 410, y: 480, w: unitW, h: unitH});
+    } else {
+      const unitH = sz * 0.22;
+      const unitW = unitH * imgAspect;
+      // Rear 3: width-relative spacing
+      const rearRow = makeRow(3, 420, 310, unitW, unitH, 0.90);
+      // Front 2: width-relative spacing, offset back
+      const frontRow = makeRow(2, 420, 470, unitW, unitH, 0.90);
+      positions.push(...rearRow, ...frontRow);
     }
-  }
-
-  // 6-PACK: two-tier (3 rear + 3 front)
-  else if (count === 6) {
-    let rearW = sz * 0.25;
-    let rearH = rearW / imgAspect;
-    let frontW = sz * 0.28;
-    let frontH = frontW / imgAspect;
-    const gap = 15;
-
-    // Constrain heights
-    let adj = constrainHeight(rearW, rearH, 250);
-    rearW = adj.w;
-    rearH = adj.h;
-    adj = constrainHeight(frontW, frontH, 250);
-    frontW = adj.w;
-    frontH = adj.h;
-
-    const rearTW = rearW * 3 + gap * 2;
-    const rearSX = (sz - rearTW) / 2 + rearW / 2;
-
-    // Rear tier
-    for (let i = 0; i < 3; i++) {
-      positions.push({x: rearSX + i * (rearW + gap), y: 330, w: rearW, h: rearH});
+  } else if (count === 6) {
+    if (isTall) {
+      const unitH = sz * 0.22;
+      const unitW = unitH * imgAspect;
+      // Rear 3: width-relative spacing (increased 6% for breathing room)
+      const rearRow = makeRow(3, 430, 300, unitW, unitH, 1.06);
+      // Front 3: width-relative spacing, offset back (increased 6%)
+      const frontRow = makeRow(3, 400, 460, unitW, unitH, 1.06);
+      positions.push(...rearRow, ...frontRow);
+    } else if (isWide) {
+      const unitH = sz * 0.14;
+      const unitW = unitH * imgAspect;
+      // Rear 3: width-relative spacing (increased 6%)
+      const rearRow = makeRow(3, 375, 310, unitW, unitH, 0.90);
+      // Front 3: width-relative spacing, offset back (increased 6%)
+      const frontRow = makeRow(3, 355, 430, unitW, unitH, 0.90);
+      positions.push(...rearRow, ...frontRow);
+    } else {
+      const unitH = sz * 0.20;
+      const unitW = unitH * imgAspect;
+      // Rear 3: width-relative spacing (increased 6%)
+      const rearRow = makeRow(3, 430, 320, unitW, unitH, 1.01);
+      // Front 3: width-relative spacing, offset back (increased 6%)
+      const frontRow = makeRow(3, 400, 480, unitW, unitH, 1.01);
+      positions.push(...rearRow, ...frontRow);
     }
-
-    // Front tier
-    for (let i = 0; i < 3; i++) {
-      positions.push({x: rearSX + i * (rearW + gap), y: 800, w: frontW, h: frontH});
+  } else if (count === 7) {
+    if (isTall) {
+      const unitH = sz * 0.20;
+      const unitW = unitH * imgAspect;
+      // Rear 3: width-relative spacing (increased 6% for breathing room)
+      const rearRow = makeRow(3, 450, 290, unitW, unitH, 0.80);
+      // Middle 2: width-relative spacing (increased 6%)
+      const middleRow = makeRow(2, 450, 370, unitW, unitH, 0.83);
+      // Front 2: width-relative spacing (increased 6%)
+      const frontRow = makeRow(2, 450, 450, unitW, unitH, 0.83);
+      positions.push(...rearRow, ...middleRow, ...frontRow);
+    } else if (isWide) {
+      const unitH = sz * 0.13;
+      const unitW = unitH * imgAspect;
+      // Rear 3: width-relative spacing (increased 6%)
+      const rearRow = makeRow(3, 385, 320, unitW, unitH, 0.59);
+      // Middle 2: width-relative spacing (increased 6%)
+      const middleRow = makeRow(2, 385, 370, unitW, unitH, 0.62);
+      // Front 2: width-relative spacing (increased 6%)
+      const frontRow = makeRow(2, 385, 420, unitW, unitH, 0.62);
+      positions.push(...rearRow, ...middleRow, ...frontRow);
+    } else {
+      const unitH = sz * 0.18;
+      const unitW = unitH * imgAspect;
+      // Rear 3: width-relative spacing (increased 6%)
+      const rearRow = makeRow(3, 450, 320, unitW, unitH, 0.76);
+      // Middle 2: width-relative spacing (increased 6%)
+      const middleRow = makeRow(2, 450, 380, unitW, unitH, 0.80);
+      // Front 2: width-relative spacing (increased 6%)
+      const frontRow = makeRow(2, 450, 440, unitW, unitH, 0.80);
+      positions.push(...rearRow, ...middleRow, ...frontRow);
     }
-  }
-
-  // 7-PACK: three-tier (3 rear + 2 middle + 2 front)
-  else if (count === 7) {
-    let rearW = sz * 0.23;
-    let rearH = rearW / imgAspect;
-    let midW = sz * 0.27;
-    let midH = midW / imgAspect;
-    let frontW = sz * 0.3;
-    let frontH = frontW / imgAspect;
-    const gap = 12;
-
-    let adj = constrainHeight(rearW, rearH, 230);
-    rearW = adj.w;
-    rearH = adj.h;
-    adj = constrainHeight(midW, midH, 220);
-    midW = adj.w;
-    midH = adj.h;
-    adj = constrainHeight(frontW, frontH, 220);
-    frontW = adj.w;
-    frontH = adj.h;
-
-    // Rear tier (3)
-    const rearTW = rearW * 3 + gap * 2;
-    const rearSX = (sz - rearTW) / 2 + rearW / 2;
-    for (let i = 0; i < 3; i++) {
-      positions.push({x: rearSX + i * (rearW + gap), y: 270, w: rearW, h: rearH});
+  } else if (count === 8) {
+    if (isTall) {
+      const unitH = sz * 0.18;
+      const unitW = unitH * imgAspect;
+      // Rear 3: width-relative spacing (increased 6% for breathing room)
+      const rearRow = makeRow(3, 450, 285, unitW, unitH, 0.80);
+      // Middle 3: width-relative spacing (increased 6%)
+      const middleRow = makeRow(3, 450, 350, unitW, unitH, 0.82);
+      // Front 2: width-relative spacing (increased 6%)
+      const frontRow = makeRow(2, 450, 415, unitW, unitH, 0.83);
+      positions.push(...rearRow, ...middleRow, ...frontRow);
+    } else if (isWide) {
+      const unitH = sz * 0.12;
+      const unitW = unitH * imgAspect;
+      // Rear 3: width-relative spacing (increased 6%)
+      const rearRow = makeRow(3, 390, 310, unitW, unitH, 0.60);
+      // Middle 3: width-relative spacing (increased 6%)
+      const middleRow = makeRow(3, 390, 360, unitW, unitH, 0.62);
+      // Front 2: width-relative spacing (increased 6%)
+      const frontRow = makeRow(2, 390, 410, unitW, unitH, 0.64);
+      positions.push(...rearRow, ...middleRow, ...frontRow);
+    } else {
+      const unitH = sz * 0.16;
+      const unitW = unitH * imgAspect;
+      // Rear 3: width-relative spacing (increased 6%)
+      const rearRow = makeRow(3, 450, 310, unitW, unitH, 0.77);
+      // Middle 3: width-relative spacing (increased 6%)
+      const middleRow = makeRow(3, 450, 365, unitW, unitH, 0.80);
+      // Front 2: width-relative spacing (increased 6%)
+      const frontRow = makeRow(2, 450, 420, unitW, unitH, 0.81);
+      positions.push(...rearRow, ...middleRow, ...frontRow);
     }
-
-    // Middle tier (2)
-    const midTW = midW * 2 + gap;
-    const midSX = (sz - midTW) / 2 + midW / 2;
-    for (let i = 0; i < 2; i++) {
-      positions.push({x: midSX + i * (midW + gap), y: 570, w: midW, h: midH});
+  } else if (count === 9) {
+    if (isTall) {
+      const unitH = sz * 0.16;
+      const unitW = unitH * imgAspect;
+      // Rear 3: width-relative spacing (increased 6% for breathing room)
+      const rearRow = makeRow(3, 460, 280, unitW, unitH, 0.81);
+      // Middle 3: width-relative spacing (increased 6%)
+      const middleRow = makeRow(3, 460, 332, unitW, unitH, 0.82);
+      // Front 3: width-relative spacing (increased 6%)
+      const frontRow = makeRow(3, 460, 384, unitW, unitH, 0.82);
+      positions.push(...rearRow, ...middleRow, ...frontRow);
+    } else if (isWide) {
+      const unitH = sz * 0.11;
+      const unitW = unitH * imgAspect;
+      // Rear 3: width-relative spacing (increased 6%)
+      const rearRow = makeRow(3, 395, 310, unitW, unitH, 0.62);
+      // Middle 3: width-relative spacing (increased 6%)
+      const middleRow = makeRow(3, 395, 347, unitW, unitH, 0.63);
+      // Front 3: width-relative spacing (increased 6%)
+      const frontRow = makeRow(3, 395, 384, unitW, unitH, 0.63);
+      positions.push(...rearRow, ...middleRow, ...frontRow);
+    } else {
+      const unitH = sz * 0.14;
+      const unitW = unitH * imgAspect;
+      // Rear 3: width-relative spacing (increased 6%)
+      const rearRow = makeRow(3, 460, 310, unitW, unitH, 0.78);
+      // Middle 3: width-relative spacing (increased 6%)
+      const middleRow = makeRow(3, 460, 355, unitW, unitH, 0.80);
+      // Front 3: width-relative spacing (increased 6%)
+      const frontRow = makeRow(3, 460, 400, unitW, unitH, 0.80);
+      positions.push(...rearRow, ...middleRow, ...frontRow);
     }
-
-    // Front tier (2)
-    const frontTW = frontW * 2 + gap;
-    const frontSX = (sz - frontTW) / 2 + frontW / 2;
-    for (let i = 0; i < 2; i++) {
-      positions.push({x: frontSX + i * (frontW + gap), y: 880, w: frontW, h: frontH});
+  } else if (count === 10) {
+    if (isTall) {
+      const unitH = sz * 0.15;
+      const unitW = unitH * imgAspect;
+      // Rear 4: width-relative spacing (increased 9% for better breathing)
+      const rearRow = makeRow(4, 420, 280, unitW, unitH, 0.76);
+      // Middle 3: width-relative spacing (increased 9%), offset back ~0.35× centerSpacing
+      // Vertical spacing increased +9% of unitH (180×0.09=16)
+      const spacing3 = unitW * 0.78;
+      const middleOffsetX = spacing3 * 0.35;
+      const middleRow = makeRow(3, 420, 364, unitW, unitH, 0.78, middleOffsetX);
+      // Front 3: width-relative spacing (increased 9%), offset back
+      const frontRow = makeRow(3, 420, 432, unitW, unitH, 0.78, middleOffsetX);
+      positions.push(...rearRow, ...middleRow, ...frontRow);
+    } else if (isWide) {
+      const unitH = sz * 0.10;
+      const unitW = unitH * imgAspect;
+      // Rear 4: width-relative spacing (increased 9%)
+      const rearRow = makeRow(4, 382, 310, unitW, unitH, 0.54);
+      // Middle 3: width-relative spacing (increased 9%), offset forward
+      // Vertical spacing increased +9% of unitH (120×0.09=11)
+      const spacing3 = unitW * 0.57;
+      const middleOffsetX = spacing3 * 0.25;
+      const middleRow = makeRow(3, 382, 368, unitW, unitH, 0.57, middleOffsetX);
+      // Front 3: width-relative spacing (increased 9%), offset forward
+      const frontRow = makeRow(3, 382, 415, unitW, unitH, 0.57, middleOffsetX);
+      positions.push(...rearRow, ...middleRow, ...frontRow);
+    } else {
+      const unitH = sz * 0.13;
+      const unitW = unitH * imgAspect;
+      // Rear 4: width-relative spacing (increased 9%)
+      const rearRow = makeRow(4, 430, 315, unitW, unitH, 0.74);
+      // Middle 3: width-relative spacing (increased 9%), offset back
+      // Vertical spacing increased +9% of unitH (156×0.09=14)
+      const spacing3 = unitW * 0.76;
+      const middleOffsetX = spacing3 * 0.30;
+      const middleRow = makeRow(3, 430, 390, unitW, unitH, 0.76, middleOffsetX);
+      // Front 3: width-relative spacing (increased 9%), offset back
+      const frontRow = makeRow(3, 430, 451, unitW, unitH, 0.76, middleOffsetX);
+      positions.push(...rearRow, ...middleRow, ...frontRow);
     }
-  }
-
-  // 8-PACK: three-tier (3 rear + 3 middle + 2 front)
-  else if (count === 8) {
-    let rearW = sz * 0.23;
-    let rearH = rearW / imgAspect;
-    let midW = sz * 0.25;
-    let midH = midW / imgAspect;
-    let frontW = sz * 0.3;
-    let frontH = frontW / imgAspect;
-    const gap = 12;
-
-    let adj = constrainHeight(rearW, rearH, 220);
-    rearW = adj.w;
-    rearH = adj.h;
-    adj = constrainHeight(midW, midH, 210);
-    midW = adj.w;
-    midH = adj.h;
-    adj = constrainHeight(frontW, frontH, 210);
-    frontW = adj.w;
-    frontH = adj.h;
-
-    // Rear tier (3)
-    const rearTW = rearW * 3 + gap * 2;
-    const rearSX = (sz - rearTW) / 2 + rearW / 2;
-    for (let i = 0; i < 3; i++) {
-      positions.push({x: rearSX + i * (rearW + gap), y: 250, w: rearW, h: rearH});
+  } else if (count === 11) {
+    if (isTall) {
+      const unitH = sz * 0.14;
+      const unitW = unitH * imgAspect;
+      // Rear 4: width-relative spacing (increased 9% for better breathing)
+      const rearRow = makeRow(4, 419, 280, unitW, unitH, 0.76);
+      // Middle 4: width-relative spacing (increased 9%), offset forward
+      // Vertical spacing increased +15 (9% of unitH: 0.14×1200×0.09≈15)
+      const spacing4 = unitW * 0.78;
+      const middleOffsetX = spacing4 * 0.25;
+      const middleRow = makeRow(4, 419, 357, unitW, unitH, 0.78, middleOffsetX);
+      // Front 3: width-relative spacing (increased 9%), offset back
+      const frontOffsetX = spacing4 * 0.40;
+      const frontRow = makeRow(3, 419, 419, unitW, unitH, 0.78, frontOffsetX);
+      positions.push(...rearRow, ...middleRow, ...frontRow);
+    } else if (isWide) {
+      const unitH = sz * 0.095;
+      const unitW = unitH * imgAspect;
+      // Rear 4: width-relative spacing (increased 9%)
+      const rearRow = makeRow(4, 382, 310, unitW, unitH, 0.54);
+      // Middle 4: width-relative spacing (increased 9%), offset forward
+      // Vertical spacing increased +10 (9% of unitH: 0.095×1200×0.09≈10)
+      const spacing4 = unitW * 0.57;
+      const middleOffsetX = spacing4 * 0.20;
+      const middleRow = makeRow(4, 382, 359, unitW, unitH, 0.57, middleOffsetX);
+      // Front 3: width-relative spacing (increased 9%), offset forward more
+      const frontOffsetX = spacing4 * 0.30;
+      const frontRow = makeRow(3, 382, 398, unitW, unitH, 0.57, frontOffsetX);
+      positions.push(...rearRow, ...middleRow, ...frontRow);
+    } else {
+      const unitH = sz * 0.12;
+      const unitW = unitH * imgAspect;
+      // Rear 4: width-relative spacing (increased 9%)
+      const rearRow = makeRow(4, 427, 315, unitW, unitH, 0.74);
+      // Middle 4: width-relative spacing (increased 9%), offset forward
+      // Vertical spacing increased +13 (9% of unitH: 0.12×1200×0.09≈13)
+      const spacing4 = unitW * 0.76;
+      const middleOffsetX = spacing4 * 0.23;
+      const middleRow = makeRow(4, 427, 382, unitW, unitH, 0.76, middleOffsetX);
+      // Front 3: width-relative spacing (increased 9%), offset back
+      const frontOffsetX = spacing4 * 0.35;
+      const frontRow = makeRow(3, 427, 436, unitW, unitH, 0.76, frontOffsetX);
+      positions.push(...rearRow, ...middleRow, ...frontRow);
     }
-
-    // Middle tier (3)
-    const midTW = midW * 3 + gap * 2;
-    const midSX = (sz - midTW) / 2 + midW / 2;
-    for (let i = 0; i < 3; i++) {
-      positions.push({x: midSX + i * (midW + gap), y: 570, w: midW, h: midH});
-    }
-
-    // Front tier (2)
-    const frontTW = frontW * 2 + gap;
-    const frontSX = (sz - frontTW) / 2 + frontW / 2;
-    for (let i = 0; i < 2; i++) {
-      positions.push({x: frontSX + i * (frontW + gap), y: 900, w: frontW, h: frontH});
-    }
-  }
-
-  // 9-PACK: three-tier (3 rear + 3 middle + 3 front)
-  else if (count === 9) {
-    let rearW = sz * 0.23;
-    let rearH = rearW / imgAspect;
-    let midW = sz * 0.25;
-    let midH = midW / imgAspect;
-    let frontW = sz * 0.26;
-    let frontH = frontW / imgAspect;
-    const gap = 12;
-
-    let adj = constrainHeight(rearW, rearH, 220);
-    rearW = adj.w;
-    rearH = adj.h;
-    adj = constrainHeight(midW, midH, 200);
-    midW = adj.w;
-    midH = adj.h;
-    adj = constrainHeight(frontW, frontH, 200);
-    frontW = adj.w;
-    frontH = adj.h;
-
-    const tierTW = rearW * 3 + gap * 2;
-    const tierSX = (sz - tierTW) / 2 + rearW / 2;
-
-    // Rear tier
-    for (let i = 0; i < 3; i++) {
-      positions.push({x: tierSX + i * (rearW + gap), y: 270, w: rearW, h: rearH});
-    }
-    // Middle tier
-    for (let i = 0; i < 3; i++) {
-      positions.push({x: tierSX + i * (rearW + gap), y: 600, w: midW, h: midH});
-    }
-    // Front tier
-    for (let i = 0; i < 3; i++) {
-      positions.push({x: tierSX + i * (rearW + gap), y: 920, w: frontW, h: frontH});
-    }
-  }
-
-  // 10-PACK: three-tier (4 rear + 3 middle + 3 front)
-  else if (count === 10) {
-    let rearW = sz * 0.2;
-    let rearH = rearW / imgAspect;
-    let midW = sz * 0.24;
-    let midH = midW / imgAspect;
-    let frontW = sz * 0.26;
-    let frontH = frontW / imgAspect;
-    const gap = 10;
-
-    let adj = constrainHeight(rearW, rearH, 210);
-    rearW = adj.w;
-    rearH = adj.h;
-    adj = constrainHeight(midW, midH, 200);
-    midW = adj.w;
-    midH = adj.h;
-    adj = constrainHeight(frontW, frontH, 200);
-    frontW = adj.w;
-    frontH = adj.h;
-
-    // Rear tier (4)
-    const rearTW = rearW * 4 + gap * 3;
-    const rearSX = (sz - rearTW) / 2 + rearW / 2;
-    for (let i = 0; i < 4; i++) {
-      positions.push({x: rearSX + i * (rearW + gap), y: 240, w: rearW, h: rearH});
-    }
-
-    // Middle tier (3)
-    const midTW = midW * 3 + gap * 2;
-    const midSX = (sz - midTW) / 2 + midW / 2;
-    for (let i = 0; i < 3; i++) {
-      positions.push({x: midSX + i * (midW + gap), y: 600, w: midW, h: midH});
-    }
-
-    // Front tier (3)
-    const frontTW = frontW * 3 + gap * 2;
-    const frontSX = (sz - frontTW) / 2 + frontW / 2;
-    for (let i = 0; i < 3; i++) {
-      positions.push({x: frontSX + i * (frontW + gap), y: 920, w: frontW, h: frontH});
-    }
-  }
-
-  // 11-PACK: three-tier (4 rear + 4 middle + 3 front)
-  else if (count === 11) {
-    let rearW = sz * 0.2;
-    let rearH = rearW / imgAspect;
-    let midW = sz * 0.21;
-    let midH = midW / imgAspect;
-    let frontW = sz * 0.25;
-    let frontH = frontW / imgAspect;
-    const gap = 10;
-
-    let adj = constrainHeight(rearW, rearH, 200);
-    rearW = adj.w;
-    rearH = adj.h;
-    adj = constrainHeight(midW, midH, 190);
-    midW = adj.w;
-    midH = adj.h;
-    adj = constrainHeight(frontW, frontH, 190);
-    frontW = adj.w;
-    frontH = adj.h;
-
-    // Rear tier (4)
-    const rearTW = rearW * 4 + gap * 3;
-    const rearSX = (sz - rearTW) / 2 + rearW / 2;
-    for (let i = 0; i < 4; i++) {
-      positions.push({x: rearSX + i * (rearW + gap), y: 220, w: rearW, h: rearH});
-    }
-
-    // Middle tier (4)
-    const midTW = midW * 4 + gap * 3;
-    const midSX = (sz - midTW) / 2 + midW / 2;
-    for (let i = 0; i < 4; i++) {
-      positions.push({x: midSX + i * (midW + gap), y: 580, w: midW, h: midH});
-    }
-
-    // Front tier (3)
-    const frontTW = frontW * 3 + gap * 2;
-    const frontSX = (sz - frontTW) / 2 + frontW / 2;
-    for (let i = 0; i < 3; i++) {
-      positions.push({x: frontSX + i * (frontW + gap), y: 920, w: frontW, h: frontH});
-    }
-  }
-
-  // 12-PACK: three-tier (4 rear + 4 middle + 4 front)
-  else if (count === 12) {
-    let rearW = sz * 0.2;
-    let rearH = rearW / imgAspect;
-    let midW = sz * 0.21;
-    let midH = midW / imgAspect;
-    let frontW = sz * 0.22;
-    let frontH = frontW / imgAspect;
-    const gap = 10;
-
-    let adj = constrainHeight(rearW, rearH, 210);
-    rearW = adj.w;
-    rearH = adj.h;
-    adj = constrainHeight(midW, midH, 190);
-    midW = adj.w;
-    midH = adj.h;
-    adj = constrainHeight(frontW, frontH, 190);
-    frontW = adj.w;
-    frontH = adj.h;
-
-    const tierTW = rearW * 4 + gap * 3;
-    const tierSX = (sz - tierTW) / 2 + rearW / 2;
-
-    // Rear tier
-    for (let i = 0; i < 4; i++) {
-      positions.push({x: tierSX + i * (rearW + gap), y: 240, w: rearW, h: rearH});
-    }
-    // Middle tier
-    for (let i = 0; i < 4; i++) {
-      positions.push({x: tierSX + i * (rearW + gap), y: 600, w: midW, h: midH});
-    }
-    // Front tier
-    for (let i = 0; i < 4; i++) {
-      positions.push({x: tierSX + i * (rearW + gap), y: 960, w: frontW, h: frontH});
+  } else if (count === 12) {
+    if (isTall) {
+      const unitH = sz * 0.13;
+      const unitW = unitH * imgAspect;
+      // Rear 4: width-relative spacing (increased 9% for better breathing)
+      const rearRow = makeRow(4, 417, 280, unitW, unitH, 0.76);
+      // Middle 4: width-relative spacing (increased 9%), offset forward
+      // Vertical spacing increased +14 (9% of unitH: 0.13×1200×0.09≈14)
+      const spacing4 = unitW * 0.78;
+      const middleOffsetX = spacing4 * 0.22;
+      const middleRow = makeRow(4, 417, 355, unitW, unitH, 0.78, middleOffsetX);
+      // Front 4: width-relative spacing (increased 9%), offset back same as rear
+      const frontRow = makeRow(4, 417, 416, unitW, unitH, 0.78);
+      positions.push(...rearRow, ...middleRow, ...frontRow);
+    } else if (isWide) {
+      const unitH = sz * 0.09;
+      const unitW = unitH * imgAspect;
+      // Rear 4: width-relative spacing (increased 9%)
+      const rearRow = makeRow(4, 382, 310, unitW, unitH, 0.54);
+      // Middle 4: width-relative spacing (increased 9%), offset forward
+      // Vertical spacing increased +10 (9% of unitH: 0.09×1200×0.09≈10)
+      const spacing4 = unitW * 0.57;
+      const middleOffsetX = spacing4 * 0.20;
+      const middleRow = makeRow(4, 382, 361, unitW, unitH, 0.57, middleOffsetX);
+      // Front 4: width-relative spacing (increased 9%), same as rear
+      const frontRow = makeRow(4, 382, 402, unitW, unitH, 0.57);
+      positions.push(...rearRow, ...middleRow, ...frontRow);
+    } else {
+      const unitH = sz * 0.11;
+      const unitW = unitH * imgAspect;
+      // Rear 4: width-relative spacing (increased 9%)
+      const rearRow = makeRow(4, 425, 315, unitW, unitH, 0.74);
+      // Middle 4: width-relative spacing (increased 9%), offset forward
+      // Vertical spacing increased +12 (9% of unitH: 0.11×1200×0.09≈12)
+      const spacing4 = unitW * 0.76;
+      const middleOffsetX = spacing4 * 0.20;
+      const middleRow = makeRow(4, 425, 375, unitW, unitH, 0.76, middleOffsetX);
+      // Front 4: width-relative spacing (increased 9%), same as rear
+      const frontRow = makeRow(4, 425, 423, unitW, unitH, 0.76);
+      positions.push(...rearRow, ...middleRow, ...frontRow);
     }
   }
 
-  // Bounds enforcement: ensure no product escapes canvas
-  return positions.map(p => {
-    let {x, y, w, h} = p;
-    const left = x - w / 2;
-    const right = x + w / 2;
-    const top = y - h / 2;
-    const bottom = y + h / 2;
+  // ========== FINAL GROUP ZOOM WITH INCREASED TARGETS ==========
+  let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
 
-    // If overflow detected, scale down uniformly while preserving aspect ratio
-    if (left < safeMargin || right > sz - safeMargin || top < safeMargin || bottom > sz - safeMargin) {
-      const horizOverflow = Math.max(0, left - safeMargin, right - (sz - safeMargin));
-      const vertOverflow = Math.max(0, top - safeMargin, bottom - (sz - safeMargin));
+  for (const p of positions) {
+    minX = Math.min(minX, p.x - p.w / 2);
+    maxX = Math.max(maxX, p.x + p.w / 2);
+    minY = Math.min(minY, p.y - p.h / 2);
+    maxY = Math.max(maxY, p.y + p.h / 2);
+  }
 
-      if (horizOverflow > 0) {
-        const scale = (sz - safeMargin * 2) / (right - left);
-        w *= scale;
-        h *= scale;
-        x = sz / 2; // re-center horizontally
-      }
-      if (vertOverflow > 0) {
-        const scale = (sz - safeMargin * 2) / (bottom - top);
-        w *= scale;
-        h *= scale;
-        y = sz / 2; // re-center vertically
-      }
-    }
+  // FINAL target fill percentages with enhanced zoom for packs 7-12
+  let targetFill = 0.75;
 
-    return {x, y, w, h};
-  });
+  if (isTall) {
+    if (count === 2) targetFill = 0.88;
+    else if (count === 3) targetFill = 0.86;
+    else if (count === 4) targetFill = 0.89;
+    else if (count === 5) targetFill = 0.89;
+    else if (count === 6) targetFill = 0.87;
+    else if (count === 7) targetFill = 0.92;
+    else if (count === 8) targetFill = 0.93;
+    else if (count === 9) targetFill = 0.93;
+    else if (count === 10) targetFill = 0.95;
+    else if (count === 11) targetFill = 0.95;
+    else targetFill = 0.95;
+  } else if (isWide) {
+    if (count === 2) targetFill = 0.72;
+    else if (count === 3) targetFill = 0.70;
+    else if (count === 4) targetFill = 0.75;
+    else if (count === 5) targetFill = 0.75;
+    else if (count === 6) targetFill = 0.73;
+    else if (count === 7) targetFill = 0.80;
+    else if (count === 8) targetFill = 0.81;
+    else if (count === 9) targetFill = 0.81;
+    else if (count === 10) targetFill = 0.90;
+    else if (count === 11) targetFill = 0.90;
+    else targetFill = 0.90;
+  } else {
+    if (count === 2) targetFill = 0.86;
+    else if (count === 3) targetFill = 0.84;
+    else if (count === 4) targetFill = 0.88;
+    else if (count === 5) targetFill = 0.88;
+    else if (count === 6) targetFill = 0.86;
+    else if (count === 7) targetFill = 0.91;
+    else if (count === 8) targetFill = 0.92;
+    else if (count === 9) targetFill = 0.92;
+    else if (count === 10) targetFill = 0.93;
+    else if (count === 11) targetFill = 0.93;
+    else targetFill = 0.93;
+  }
+
+  const horizSpace = sz - safeMargin * 2 - eps;
+  const vertSpace = sz - safeMargin * 2 - eps;
+  const groupWidth = maxX - minX;
+  const groupHeight = maxY - minY;
+
+  // Calculate scales: hard max (to not overflow) and target fill scale
+  const horizMaxScale = horizSpace / groupWidth;
+  const vertMaxScale = vertSpace / groupHeight;
+  const horizTargetScale = (horizSpace / groupWidth) * targetFill;
+  const vertTargetScale = (vertSpace / groupHeight) * targetFill;
+
+  // Try to achieve target fill, but cap to hard bounds
+  let groupScale = Math.min(horizTargetScale, vertTargetScale);
+  groupScale = Math.min(groupScale, horizMaxScale, vertMaxScale);
+
+  const centerX = (minX + maxX) / 2;
+  const centerY = (minY + maxY) / 2;
+  const canvasCenterX = sz / 2;
+  const canvasCenterY = sz / 2;
+
+  const finalPositions = positions.map(p => ({
+    x: canvasCenterX + (p.x - centerX) * groupScale,
+    y: canvasCenterY + (p.y - centerY) * groupScale,
+    w: p.w * groupScale,
+    h: p.h * groupScale
+  }));
+
+  return finalPositions;
 }
 
 // Dibuja el distintivo circular "N Pack" — igual al de la herramienta de Manuel
@@ -3107,16 +3163,28 @@ function psDrawBadge(ctx, count, sz){
 // Genera la imagen del paquete: `count` copias de `img` + distintivo (si count>1)
 function psGeneratePackImage(img, count){
   try {
+    // PERFORMANCE INSTRUMENTATION
+    const perfStart = performance.now();
+    const perfMarks = {};
+
     console.log('🎨 psGeneratePackImage start, count=' + count);
     const sz=1200, cv=document.createElement('canvas'); cv.width=sz; cv.height=sz;
     const cx=cv.getContext('2d'); cx.imageSmoothingEnabled=true; cx.imageSmoothingQuality='high';
     cx.fillStyle='#FFF'; cx.fillRect(0,0,sz,sz);
 
+    perfMarks.boundsStart = performance.now();
     console.log('🎨 Getting visible bounds (cached if available)');
     const visibleBounds = psGetVisibleImageBounds(img);
+    perfMarks.boundsEnd = performance.now();
+    console.log('[PERF][PACK ' + count + '] visible-bounds: ' + Math.round(perfMarks.boundsEnd - perfMarks.boundsStart) + ' ms');
+
+    perfMarks.layoutStart = performance.now();
     console.log('🎨 Computing layout with aspect ' + visibleBounds.aspect.toFixed(3));
     const positions = psComputeLayout(count, sz, visibleBounds.aspect);
+    perfMarks.layoutEnd = performance.now();
+    console.log('[PERF][PACK ' + count + '] layout: ' + Math.round(perfMarks.layoutEnd - perfMarks.layoutStart) + ' ms');
 
+    perfMarks.drawStart = performance.now();
     console.log('🎨 Drawing ' + positions.length + ' product instances');
     positions.forEach((p, idx) => {
       cx.drawImage(
@@ -3131,13 +3199,27 @@ function psGeneratePackImage(img, count){
         p.h
       );
     });
+    perfMarks.drawEnd = performance.now();
+    console.log('[PERF][PACK ' + count + '] canvas-draw: ' + Math.round(perfMarks.drawEnd - perfMarks.drawStart) + ' ms');
 
+    perfMarks.badgeStart = performance.now();
     if (count > 1) {
       console.log('🎨 Drawing badge');
       psDrawBadge(cx, count, sz);
     }
+    perfMarks.badgeEnd = performance.now();
+    console.log('[PERF][PACK ' + count + '] badge: ' + Math.round(perfMarks.badgeEnd - perfMarks.badgeStart) + ' ms');
+
+    perfMarks.jpegStart = performance.now();
+    const dataUrl = cv.toDataURL('image/jpeg', .92);
+    perfMarks.jpegEnd = performance.now();
+    console.log('[PERF][PACK ' + count + '] jpeg: ' + Math.round(perfMarks.jpegEnd - perfMarks.jpegStart) + ' ms');
+
     console.log('🎨 psGeneratePackImage complete for count=' + count);
-    return cv.toDataURL('image/jpeg', .92);
+    const totalCanvasTime = performance.now() - perfStart;
+    console.log('[PERF][PACK ' + count + '] canvas-total: ' + Math.round(totalCanvasTime) + ' ms');
+
+    return dataUrl;
   } catch (error) {
     console.error('❌ psGeneratePackImage error:', error, 'count=' + count);
     throw error;
@@ -3168,6 +3250,10 @@ async function psGenerateAllPacks(){
   const resetBtn = () => { if(btn){ btn.disabled=false; btn.textContent='🎁 Generar Imágenes de Pack (1-12)'; } };
 
   try{
+    // PERFORMANCE INSTRUMENTATION
+    const perfStart = performance.now();
+    const perfMarks = { start: perfStart };
+
     if(btn){ btn.disabled=true; btn.textContent='⏳ Generando...'; }
     if(statusEl) statusEl.textContent = '📥 Cargando fotos...';
 
@@ -3176,8 +3262,11 @@ async function psGenerateAllPacks(){
     console.log('Front source:', frontSrc.substring(0,40));
     console.log('Back source:', backSrc.substring(0,40));
 
+    perfMarks.imgLoadStart = performance.now();
     const frontImg = await psLoadImage(frontSrc);
     const backImg  = await psLoadImage(backSrc);
+    perfMarks.imgLoadEnd = performance.now();
+    console.log('[PERF][PACKS] image-load: ' + Math.round(perfMarks.imgLoadEnd - perfMarks.imgLoadStart) + ' ms');
     console.log('✅ Fotos cargadas en memoria:', frontImg.width+'x'+frontImg.height, backImg.width+'x'+backImg.height);
 
     // Cargar también las fotos extra (opcionales) — mismo tratamiento que BACK
@@ -3203,23 +3292,46 @@ async function psGenerateAllPacks(){
 
     // 1) Generar SOLO las imágenes de packs activos — esto es solo Canvas, instantáneo
     if(statusEl) statusEl.textContent = '🖼️ Dibujando imágenes...';
+    perfMarks.canvasStart = performance.now();
     const backDataUrl = psGenerateSingleImage(backImg);
     const extraDataUrls = extraImgs.map(function(img){ return psGenerateSingleImage(img); });
     const frontDataUrls = {};
     _activePacks.forEach(function(p){ frontDataUrls[p] = psGeneratePackImage(frontImg, p); });
+    perfMarks.canvasEnd = performance.now();
+    console.log('[PERF][PACKS] canvas-draw: ' + Math.round(perfMarks.canvasEnd - perfMarks.canvasStart) + ' ms');
     console.log('✅ ' + (2 + extraDataUrls.length) + ' imágenes dibujadas en canvas (back + extras + ' + _activePacks.length + ' pack activos)');
 
     // 2) Subir SOLO packs activos EN PARALELO con timeout de 20s cada una — si una falla o tarda
     // demasiado, se usa la imagen local en su lugar en vez de trabar todo el proceso.
     if(statusEl) statusEl.textContent = '📤 Subiendo imágenes (puede tardar unos segundos)...';
+    const packUploadMarks = {}; // Track timing for each pack
     function uploadWithTimeout(dataUrl, name){
       if(!imgbbKey) return Promise.resolve(dataUrl);
+      const uploadStartTime = performance.now();
+      packUploadMarks[name] = { start: uploadStartTime };
+
       const timeoutPromise = new Promise(function(resolve){
-        setTimeout(function(){ console.warn('⏱️ Timeout subiendo '+name+', usando imagen local'); resolve(dataUrl); }, 20000);
+        setTimeout(function(){
+          console.warn('⏱️ Timeout subiendo '+name+', usando imagen local');
+          packUploadMarks[name].timeout = true;
+          resolve(dataUrl);
+        }, 20000);
       });
+
       const uploadPromise = clUploadPhotoToImgBB(dataUrl, imgbbKey, name)
-        .then(function(url){ return url || dataUrl; })
-        .catch(function(e){ console.warn('⚠️ Error subiendo '+name+':', e.message); return dataUrl; });
+        .then(function(url){
+          const uploadEndTime = performance.now();
+          packUploadMarks[name].end = uploadEndTime;
+          console.log('[PERF][UPLOAD] ' + name + ': ' + Math.round(uploadEndTime - uploadStartTime) + ' ms');
+          return url || dataUrl;
+        })
+        .catch(function(e){
+          const uploadEndTime = performance.now();
+          packUploadMarks[name].end = uploadEndTime;
+          packUploadMarks[name].error = e.message;
+          console.warn('⚠️ Error subiendo '+name+' (' + Math.round(uploadEndTime - uploadStartTime) + ' ms):', e.message);
+          return dataUrl;
+        });
       return Promise.race([uploadPromise, timeoutPromise]);
     }
 
@@ -3229,15 +3341,21 @@ async function psGenerateAllPacks(){
       ...extraDataUrls.map(function(du, i){ return function(){ return uploadWithTimeout(du, 'pack-extra-'+i); }; }),
       ..._activePacks.map(function(p){ return function(){ return uploadWithTimeout(frontDataUrls[p], 'pack-'+p); }; })
     ];
+    console.log('[PERF][UPLOAD] Total upload tasks: ' + uploadTasks.length + ', maxConcurrency: 2');
 
     // Execute with max 2 concurrent uploads to reduce main-thread compression saturation
     const results = [];
     const maxConcurrency = 2;
+    perfMarks.uploadStart = performance.now();
     for (let i = 0; i < uploadTasks.length; i += maxConcurrency) {
       const batch = uploadTasks.slice(i, i + maxConcurrency);
+      console.log('[PERF][UPLOAD] Starting batch ' + Math.floor(i / maxConcurrency) + ' with ' + batch.length + ' task(s)');
       const batchResults = await Promise.all(batch.map(function(task){ return task(); }));
       results.push(...batchResults);
     }
+    perfMarks.uploadEnd = performance.now();
+    console.log('[PERF][UPLOAD] All uploads completed: ' + Math.round(perfMarks.uploadEnd - perfMarks.uploadStart) + ' ms');
+
     const backUrl = results[0];
     const extraUrls = results.slice(1, 1 + extraDataUrls.length);
     const frontResults = results.slice(1 + extraDataUrls.length);
@@ -3248,7 +3366,14 @@ async function psGenerateAllPacks(){
 
     if(statusEl) statusEl.textContent = '';
     toast('✅ ' + _activePacks.length + ' paquete(s) generado(s): ' + _activePacks.join(', '));
+
+    perfMarks.previewStart = performance.now();
     renderPackImagesPreview();
+    perfMarks.previewEnd = performance.now();
+    console.log('[PERF][PREVIEW] render: ' + Math.round(perfMarks.previewEnd - perfMarks.previewStart) + ' ms');
+
+    perfMarks.end = performance.now();
+    console.log('[PERF][PACKS] TOTAL time: ' + Math.round(perfMarks.end - perfMarks.start) + ' ms');
   }catch(err){
     console.error('❌ psGenerateAllPacks error:', err);
     const isTainted = /tainted|SecurityError|insecure/i.test(err.message||'') || err.name==='SecurityError';
