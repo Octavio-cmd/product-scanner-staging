@@ -7939,56 +7939,75 @@ function descForPack(desc, packs, curObj) {
   if (!desc) return desc;
 
   // ── DYNAMIC PRODUCT-SPECIFIC PACKAGE CONTENTS GENERATION ──
-  // Extract product identity from curObj for dynamic bundle text
+  // Extract clean product identity from immutable base fields
   var productName = '';
   if (curObj) {
-    productName = (curObj._selectedTitle || curObj.title || (curObj.prod && curObj.prod.title) || '').trim();
+    // Use the original product title from curObj.prod (immutable, before any eBay transformations)
+    // or fall back to curObj.title (base title before pack-specific modifications)
+    // Never use curObj._selectedTitle as it contains pack-specific "Pack of N" and "New" suffixes
+    productName = (curObj.prod && curObj.prod.title) || (curObj.title || '');
+    productName = productName.trim();
   }
 
-  // ── Generate bundle-specific text with actual pack quantity and product identity
-  var bundleIntro = '';
-  if (packs === 1) {
-    bundleIntro = 'This listing includes 1 individual unit';
-  } else {
-    bundleIntro = 'This bundle includes ' + packs + ' individual unit' + (packs > 1 ? 's' : '');
-  }
-
-  if (productName) {
-    bundleIntro += ' of ' + productName;
-  } else {
-    bundleIntro += ' of the product';
-  }
-  bundleIntro += '.';
-
-  // ── Generate package_contents that identifies the product specifically ──
+  // ── Generate package_contents with clean architecture (no duplication) ──
+  // packageContents describes WHAT the units are, WITHOUT the pack count
   var packageContents = '';
+  var productDescFacts = (desc.package_contents || '').trim();
+
   if (productName) {
-    if (packs === 1) {
-      packageContents = productName;
-    } else {
-      // Plural form: "12 LEGO Creator 3 in 1 Space Shuttle Building Sets"
-      packageContents = packs + ' ' + productName;
-      // Simple heuristic: if productName ends with certain singular words, pluralize
-      if (productName.match(/\b(set|kit|pack|item|unit|piece|box|bottle|container|jar|tube|can|bag|pouch|packet)$/i)) {
-        packageContents = packs + ' ' + productName + 's';
+    // Base: just the product name (without pack count at this stage)
+    packageContents = productName;
+
+    // Only append facts from Claude if they add NEW information not already in productName
+    // Extract just the factual suffix (e.g., "with 144 pieces") - the part after the product description
+    if (productDescFacts) {
+      // Look for factual details like "with N pieces", "containing", "size", etc.
+      var factMatch = productDescFacts.match(/\b(?:with|contains?|size|color|material|includes?).+$/i);
+      if (factMatch) {
+        packageContents += ' ' + factMatch[0];
       }
     }
   } else {
-    packageContents = packs + ' unit' + (packs > 1 ? 's' : '') + ' of the product';
+    // Fallback when no product name available
+    packageContents = 'the product';
+    if (productDescFacts) {
+      packageContents += ' ' + productDescFacts;
+    }
   }
 
   if (typeof desc === 'string') {
     // Original string description stays untouched.
     // Prepend bundle intro.
-    return bundleIntro + ' ' + desc;
+    var bundleIntro = (packs === 1 ? 'This listing includes 1 individual unit' : 'This bundle includes ' + packs + ' individual units');
+    if (productName) {
+      bundleIntro += ' of ' + productName;
+    } else {
+      bundleIntro += ' of the product';
+    }
+    return bundleIntro + '. ' + desc;
   }
 
   // Structured description object (from Claude/Algopix)
   // Rebuild with immutable original data + generated bundle text
+  // Build final text with pluralization if needed
+  var bundlePrefix = (packs === 1 ? 'This listing includes 1 individual unit of ' : 'This bundle includes ' + packs + ' individual units of ');
+  var bundleContents = packageContents;
+
+  // Apply pluralization: if we have multiple packs and product name ends with singular countable
+  if (packs > 1 && productName && productName.match(/\b(set|kit|pack|item|unit|piece|box|bottle|container|jar|tube|can|bag|pouch|packet)$/i)) {
+    // Pluralize the last word of packageContents if it matches the last word of productName
+    var lastWord = productName.split(/\s+/).pop();
+    if (lastWord && /^(set|kit|pack|item|unit|piece|box|bottle|container|jar|tube|can|bag|pouch|packet)$/i.test(lastWord)) {
+      bundleContents = bundleContents.replace(new RegExp('\\b' + lastWord + '\\b(?!.*\\b' + lastWord + '\\b)', 'i'), lastWord + 's');
+    }
+  }
+
+  var finalPackageContents = bundlePrefix + bundleContents;
+
   return {
     intro: desc.intro || '',  // Original intro, untouched (product facts only)
     benefits: desc.benefits || [],  // Original benefits, untouched (product facts only)
-    package_contents: bundleIntro + ' ' + packageContents + (desc.package_contents ? ' ' + desc.package_contents : ''),
+    package_contents: finalPackageContents,
     disclaimer: psDisclaimerForPack(desc.disclaimer || '', packs)
   };
 }
