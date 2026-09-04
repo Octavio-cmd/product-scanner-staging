@@ -3884,15 +3884,346 @@ function formatExpForTitle(expDate) {
   return mo && yr ? 'Exp ' + mo + '/' + yr : '';
 }
 
+// ── CANONICAL ORDER TITLE ARCHITECTURE ──────────────────────────────────────
+// PRINCIPLE: Preserve original base-title word order. Annotate spans with
+// priorities based on structured data. Remove complete low-priority spans
+// when fitting to 80 chars.
+
+// Extract semantic priority from structured data (cur.brand, cur.prod.aspects, cur._specifics)
+function extractPrioritiesFromStructuredData(curObj) {
+  var priorities = {}; // {word_or_phrase: priority_number}
+
+  if (!curObj) return priorities;
+
+  // RIGID (5): Brand is always RIGID
+  if (curObj.brand) {
+    var brandWords = curObj.brand.split(/\s+/);
+    brandWords.forEach(function(w) {
+      priorities[w] = 5; // RIGID
+    });
+  }
+
+  // RIGID/VERY_HIGH (5/4): Product aspects inform semantic roles
+  if (curObj.prod && curObj.prod.aspects && Array.isArray(curObj.prod.aspects)) {
+    curObj.prod.aspects.forEach(function(aspect) {
+      if (!aspect.name || !aspect.value) return;
+
+      var name = String(aspect.name).toLowerCase().trim();
+      var value = String(aspect.value).trim();
+      var valueWords = value.split(/\s+/);
+
+      // Determine priority based on aspect type
+      var priority = 2; // default MEDIUM
+
+      if (name.indexOf('type') !== -1 || name.indexOf('category') !== -1) {
+        priority = 5; // RIGID - Product Type
+      } else if (name.indexOf('brand') !== -1) {
+        priority = 5; // RIGID
+      } else if (name.indexOf('capacity') !== -1 || name.indexOf('storage') !== -1 ||
+                 name.indexOf('memory') !== -1 || name.indexOf('piece') !== -1 ||
+                 name.indexOf('size') !== -1 || name.indexOf('quantity') !== -1) {
+        priority = 4; // VERY_HIGH - Product Fact
+      } else if (name.indexOf('model') !== -1 || name.indexOf('series') !== -1 ||
+                 name.indexOf('generation') !== -1 || name.indexOf('version') !== -1) {
+        priority = 4; // VERY_HIGH
+      } else if (name.indexOf('product line') !== -1 || name.indexOf('line') !== -1 ||
+                 name.indexOf('collection') !== -1) {
+        priority = 3; // HIGH
+      } else if (name.indexOf('color') !== -1 || name.indexOf('shade') !== -1) {
+        priority = 2; // MEDIUM
+      }
+
+      // Assign priority to each word in the value
+      valueWords.forEach(function(w) {
+        if (!priorities[w] || priorities[w] < priority) {
+          priorities[w] = priority;
+        }
+      });
+    });
+  }
+
+  // Handle cur._specifics similarly if present
+  if (curObj._specifics && typeof curObj._specifics === 'object') {
+    Object.keys(curObj._specifics).forEach(function(key) {
+      var value = curObj._specifics[key];
+      if (typeof value !== 'string') value = String(value);
+
+      var priority = 2; // default MEDIUM
+      if (key.toLowerCase().indexOf('type') !== -1) {
+        priority = 5;
+      } else if (key.toLowerCase().indexOf('capacity') !== -1 ||
+                 key.toLowerCase().indexOf('size') !== -1) {
+        priority = 4;
+      }
+
+      var valueWords = value.split(/\s+/);
+      valueWords.forEach(function(w) {
+        if (!priorities[w] || priorities[w] < priority) {
+          priorities[w] = priority;
+        }
+      });
+    });
+  }
+
+  return priorities;
+}
+
+// Parse base title into semantic spans (compound nouns, numeric facts, etc.)
+function parseIntoSpans(base) {
+  var words = base.split(/\s+/).filter(Boolean);
+  var spans = []; // Array of {value, startIdx, endIdx, wordCount}
+  var i = 0;
+
+  while (i < words.length) {
+    var word = words[i];
+    var span = null;
+
+    // Pattern: Number + "in" + Number (e.g., "3 in 1")
+    if (/^\d+$/.test(word) && i + 2 < words.length &&
+        words[i + 1].toLowerCase() === 'in' && /^\d+$/.test(words[i + 2])) {
+      span = {
+        value: word + ' in ' + words[i + 2],
+        wordCount: 3,
+        startIdx: i
+      };
+      i += 3;
+    }
+    // Pattern: Number + letter (e.g., "144pcs", "16oz")
+    else if (/^\d+[a-zA-Z]+$/.test(word)) {
+      span = {
+        value: word,
+        wordCount: 1,
+        startIdx: i
+      };
+      i++;
+    }
+    // Pattern: Two consecutive words both starting with capital (compound noun)
+    // e.g., "Space Shuttle", "Building Set", "Astronaut Figure"
+    else if (i + 1 < words.length && /^[A-Z]/.test(word) && /^[A-Z]/.test(words[i + 1])) {
+      span = {
+        value: word + ' ' + words[i + 1],
+        wordCount: 2,
+        startIdx: i
+      };
+      i += 2;
+    }
+    // Single word
+    else {
+      span = {
+        value: word,
+        wordCount: 1,
+        startIdx: i
+      };
+      i++;
+    }
+
+    if (span) spans.push(span);
+  }
+
+  return spans;
+}
+
+// Classify span semantic role to improve tie-breaking
+function classifySpanRole(span, index, spans, curObj) {
+  var value = span.value;
+  var wordCount = span.wordCount;
+
+  // RIGID roles
+  if (curObj && curObj.brand && value.indexOf(curObj.brand) !== -1) {
+    return 'BRAND'; // RIGID
+  }
+
+  // Check if this span ends in product-type indicators
+  var isTypeIndicator = /[Ss]et|[Kk]it|[Pp]ack\b/.test(value);
+  if (isTypeIndicator && wordCount === 2) {
+    return 'PRODUCT_TYPE'; // RIGID
+  }
+
+  // Numeric facts are VERY_HIGH
+  if (/^\d+[a-z]+$/i.test(value) || /\d+ [a-z]+/i.test(value)) {
+    return 'PRIMARY_FACT'; // VERY_HIGH
+  }
+
+  // Check structured data for role hints
+  if (curObj && curObj.prod && curObj.prod.aspects) {
+    var aspects = curObj.prod.aspects;
+    for (var i = 0; i < aspects.length; i++) {
+      var aspect = aspects[i];
+      if (!aspect.value) continue;
+
+      var aspValue = String(aspect.value).toLowerCase();
+      var spanLower = value.toLowerCase();
+
+      // If this span matches a structured aspect
+      if (aspValue.indexOf(spanLower) !== -1 || spanLower.indexOf(aspValue) !== -1) {
+        var aspName = String(aspect.name).toLowerCase();
+
+        // Identify core/model aspects
+        if (aspName.indexOf('model') !== -1 || aspName.indexOf('name') !== -1 ||
+            aspName.indexOf('product name') !== -1 || aspName.indexOf('variant') !== -1) {
+          return 'CORE_PRODUCT'; // HIGH or higher
+        }
+        if (aspName.indexOf('line') !== -1 || aspName.indexOf('collection') !== -1 ||
+            aspName.indexOf('series') !== -1) {
+          return 'PRODUCT_LINE'; // HIGH
+        }
+      }
+    }
+  }
+
+  // Heuristic: compound nouns in middle of title (position-based)
+  // Spans in the 2nd-3rd position after brand are likely core product
+  if (wordCount === 2 && index >= 1 && index <= 3) {
+    var firstWord = value.split(/\s+/)[0];
+    // If first word is capitalized and not a typical descriptor word
+    if (/^[A-Z]/.test(firstWord) && !(/^(and|the|this|that|with|for|or)$/i.test(firstWord))) {
+      // Distinguish core product from secondary descriptors
+      if (/[Ss]et|[Kk]it|[Bb]undle|[Pp]ack\b/.test(value)) {
+        return 'PRODUCT_TYPE';
+      } else if (!/[Ff]igure|[Cc]olor|[Ee]dition|[Ss]tyle|[Vv]ariant|[Cc]apsule|[Tt]ablet/.test(value)) {
+        // Likely core product if not matching secondary feature patterns
+        return 'CORE_PRODUCT';
+      }
+    }
+  }
+
+  // Secondary feature indicators
+  if (/[Ff]igure|[Bb]rush|[Cc]apsule|[Tt]ablet|[Cc]ollagen|[Cc]olor\b|[Ss]tyle|[Ee]dition|[Dd]esign|[Vv]ariant|[Dd]ecorative|[Ff]ormula|[Cc]omponent/.test(value)) {
+    return 'SECONDARY_DESCRIPTOR'; // MEDIUM
+  }
+
+  // Default heuristic for compound nouns (capital + capital)
+  if (wordCount === 2 && /^[A-Z]/.test(value)) {
+    // "Building Set", "Astronaut Figure"
+    if (/[Ss]et|[Kk]it|[Pp]ack\b/.test(value)) {
+      return 'PRODUCT_TYPE';
+    } else if (/[Ff]igure|[Bb]rook|[Cc]apsule|[Bb]undle|[Bb]rush|[Tt]ablet/.test(value)) {
+      return 'SECONDARY_DESCRIPTOR';
+    } else {
+      return 'CORE_PRODUCT';
+    }
+  }
+
+  return 'VARIANT'; // Default
+}
+
+// Assign semantic importance score for tie-breaking
+function semanticImportance(role) {
+  var scores = {
+    'BRAND': 1000,
+    'PRODUCT_TYPE': 900,
+    'CORE_PRODUCT': 850,
+    'PRODUCT_LINE': 800,
+    'PRIMARY_FACT': 750,
+    'VARIANT': 500,
+    'SECONDARY_DESCRIPTOR': 100
+  };
+  return scores[role] || 0;
+}
+
+// Annotate each span with priority and semantic role based on structured data
+function annotateSpans(spans, base, curObj) {
+  var priorities = extractPrioritiesFromStructuredData(curObj);
+
+  spans.forEach(function(span, index) {
+    // Get max priority of any word in this span
+    var spanWords = span.value.split(/\s+/);
+    var maxPriority = 0;
+
+    spanWords.forEach(function(w) {
+      var priority = priorities[w] || 2; // default MEDIUM
+      if (priority > maxPriority) maxPriority = priority;
+    });
+
+    // Classify semantic role
+    var role = classifySpanRole(span, index, spans, curObj);
+    var semanticScore = semanticImportance(role);
+
+    // Adjust priority based on role classification
+    if (role === 'PRODUCT_TYPE' && maxPriority < 5) {
+      maxPriority = 5; // PRODUCT_TYPE is RIGID
+    } else if (role === 'CORE_PRODUCT' && maxPriority < 4) {
+      maxPriority = 4; // CORE_PRODUCT is VERY_HIGH
+    } else if (role === 'PRIMARY_FACT' && maxPriority < 4) {
+      maxPriority = 4;
+    } else if (role === 'PRODUCT_LINE' && maxPriority < 3) {
+      maxPriority = 3;
+    } else if (role === 'SECONDARY_DESCRIPTOR' && maxPriority > 2) {
+      maxPriority = 2; // Cap secondary descriptors at MEDIUM
+    }
+
+    // Numeric patterns are usually at least VERY_HIGH
+    if (/\d/.test(span.value) && maxPriority < 4) {
+      maxPriority = 4;
+    }
+
+    span.priority = maxPriority;
+    span.role = role;
+    span.semanticScore = semanticScore;
+  });
+}
+
+// Build title by keeping spans in original order, removing low-priority spans when over 80 chars
+function buildTitleFromSpans(spans, n, shade, expDate, curObj) {
+  var suffix = '';
+  if (shade) suffix += ' ' + shade;
+
+  var expStr = formatExpForTitle(expDate);
+  if (expStr) suffix += ' ' + expStr;
+
+  if (Number(n) >= 2) suffix += ' Pack of ' + n;
+  suffix += ' New';
+
+  // Start with all spans
+  var activeSpans = spans.map(function(s, idx) {
+    return Object.assign({}, s, {originalIdx: idx});
+  });
+
+  // Build base title with all spans in original order
+  var baseTitle = activeSpans.map(function(s) { return s.value; }).join(' ');
+  var output = baseTitle + suffix;
+
+  // If already fits, return
+  if (output.length <= 80) {
+    return output;
+  }
+
+  // Remove low-priority spans until it fits
+  while (activeSpans.length > 0) {
+    // Sort by priority (ascending), then by semantic importance (descending) for tie-breaking
+    activeSpans.sort(function(a, b) {
+      if (a.priority !== b.priority) {
+        return a.priority - b.priority; // Lower priority first
+      }
+      // Tie-breaker: prefer keeping spans with higher semantic importance
+      // (Subtract because we're sorting ascending but want higher importance to stay)
+      return (b.semanticScore || 0) - (a.semanticScore || 0);
+    });
+
+    // Remove the lowest-priority span (or lowest semantic importance if priority is tied)
+    activeSpans.shift();
+
+    // Rebuild in original order
+    activeSpans.sort(function(a, b) { return a.originalIdx - b.originalIdx; });
+    baseTitle = activeSpans.map(function(s) { return s.value; }).join(' ');
+    output = baseTitle + suffix;
+
+    if (output.length <= 80) {
+      return output;
+    }
+  }
+
+  // Fallback: just the suffix
+  return suffix.trim();
+}
+
 function rebuildTitle(base, n, shade, expDate) {
   shade   = shade   || '';
   expDate = expDate || '';
   if (!base) return (shade?shade+' ':'') + (Number(n) >= 2 ? 'Pack of ' + n + ' ' : '') + 'New';
-  // Strip existing pack / new / exp references
-  var t = base
-    // Fechas de expiración en CUALQUIER formato: "Exp 07/27", "Exp 07/2027",
-    // "Expires 03/28", "Exp. 12/2026", "EXP 5/27", "Exp 07-2027", etc.
-    // (antes solo cubría 2 dígitos de año y dejaba pasar "Exp 07/2027")
+
+  // Clean the base title (remove existing pack / new / exp references)
+  var cleanBase = base
     .replace(/\bexp(?:ires?|iration)?\.?\s*\d{1,2}[\/\-]\d{2,4}\b/gi, '')
     .replace(/\bexp(?:ires?|iration)?\.?\s*\d{2,4}\b/gi, '')
     .replace(/\bpack of \d+\b/gi, '').replace(/\b\d+[-\s]?pack\b/gi, '')
@@ -3900,24 +4231,23 @@ function rebuildTitle(base, n, shade, expDate) {
     .replace(/\bbundle of \d+\b/gi, '').replace(/\bnew sealed\b/gi, '')
     .replace(/\bnew\b\s*$/gi, '').replace(/\s{2,}/g, ' ').trim()
     .replace(/[·\-,\.]+\s*$/, '').trim();
-  var expStr = formatExpForTitle(expDate);
-  // El sufijo (shade + Exp + Pack of N New) SIEMPRE va completo dentro de los 80 chars de eBay.
-  // Si el título es muy largo, se recorta el NOMBRE del producto, nunca el "Pack of N".
-  // NOTA: "Pack of 1" NO se muestra en el título (1 pieza no es un "pack" y
-  // desperdicia caracteres). Solo se muestra "Pack of N" para 2 o más.
-  var suffix = '';
-  if (shade)  suffix += ' ' + shade;
-  if (expStr) suffix += ' ' + expStr;
-  if (Number(n) >= 2) suffix += ' Pack of ' + n;
-  suffix += ' New';
-  var maxBase = 80 - suffix.length;
-  if (maxBase < 0) maxBase = 0;
-  if (t.length > maxBase) {
-    t = t.substring(0, maxBase).replace(/\s+\S*$/, '').trim();
+
+  // Parse into semantic spans (preserving original order)
+  var spans = parseIntoSpans(cleanBase);
+
+  // Annotate spans with priorities from structured data
+  annotateSpans(spans, cleanBase, typeof cur !== 'undefined' ? cur : null);
+
+  // Build title by removing low-priority complete spans when over 80 chars
+  var output = buildTitleFromSpans(spans, n, shade, expDate, typeof cur !== 'undefined' ? cur : null);
+
+  // Hard limit at 80 chars (safety fallback)
+  if (output.length > 80) {
+    output = output.substring(0, 80).replace(/\s+\S*$/, '').trim();
   }
-  var _out = (t + suffix).trim().substring(0, 80);
-  // Corrección de mayúsculas antes de mostrarlo (ver psFixTitleCase).
-  return psFixTitleCase(_out, (typeof cur !== 'undefined' && cur && cur.brand) || '');
+
+  // Apply title case correction
+  return psFixTitleCase(output, (typeof cur !== 'undefined' && cur && cur.brand) || '');
 }
 
 // ── CORRECCIÓN DE MAYÚSCULAS EN EL TÍTULO ───────────────────────────────────
