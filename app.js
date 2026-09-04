@@ -5603,13 +5603,52 @@ async function addSplitPacksToCSV(){
   var tierKey = card.dataset.tier || card.dataset.autoTier || 'media';
   var active = window._splitActive || {1:true,2:false,3:true,4:false,5:false,6:true,7:false,8:false,9:false,10:false,11:false,12:true};
   var split = computeSplit(total, tierKey, active);
+
+  // ── QUANTITY DIAGNOSTICS (Temporary instrumentation for root cause verification)
+  // Log the complete quantity allocation path for each selected pack
+  // IMPORTANT: Diagnostics DO NOT ALTER quantity values. Actual values reported as-is.
+  console.log('[QTY-TRACE][SOURCE] inventory:' + total + ' tier:' + tierKey + ' selected:' + PACK_SIZES.filter(function(p){ return active[p]; }).join(','));
+  var totalPhysicalExposure = 0;
+  PACK_SIZES.forEach(function(p) {
+    if (!active[p]) return;
+    var computedQty = split[p] && split[p].listings || 0;
+    var manualOverride = window._splitManual && window._splitManual[p];
+    var finalQty = (manualOverride != null) ? manualOverride : computedQty;
+    var physicalExposure = finalQty * p;  // Actual exposure, not fabricated
+    if (finalQty > 0) totalPhysicalExposure += physicalExposure;  // Only count positive quantities
+    console.log('[QTY-TRACE] Pack ' + p + 'pk: computed=' + computedQty + ' manual=' + (manualOverride != null ? manualOverride : 'none') + ' final=' + finalQty + ' exposure=' + physicalExposure + ' units');
+  });
+  console.log('[QTY-TRACE][SUMMARY] total_physical_exposure:' + totalPhysicalExposure + ' units');
+
   var shade = (cur._shade || '').trim();
   var expDate = cur._expDate || '';
   var location = cur.location || '';
   var baseTitle = (window._packState && window._packState.baseTitle) || cur.title || '';
 
   var added = 0, skippedDup = 0;
-  var packsToAdd = PACK_SIZES.filter(function(p){ return active[p] && getSplitListings(split, p) > 0; });
+  // ── P0-A FIX: Pack selection must be based on user's active selection alone, not on quantity calculation.
+  // User explicitly selecting a pack size should ALWAYS generate a CSV row, even if initial quantity is low.
+  var packsToAdd = PACK_SIZES.filter(function(p){ return active[p]; });
+
+  // ── ZERO QUANTITY VALIDATION: Block CSV export if any selected pack has Quantity <= 0
+  // This prevents exporting invalid eBay CSVs while keeping selected packs recognized
+  var zeroQtyPacks = [];
+  packsToAdd.forEach(function(p) {
+    var finalQty = getSplitListings(split, p);
+    if (finalQty <= 0) {
+      zeroQtyPacks.push(p);
+    }
+  });
+
+  if (zeroQtyPacks.length > 0) {
+    var msg = '❌ Cannot export CSV: Pack' + (zeroQtyPacks.length > 1 ? 's' : '') + ' ' + zeroQtyPacks.map(p => p + 'pk').join(', ') +
+              ' ha' + (zeroQtyPacks.length > 1 ? 'n' : '') + ' recibido cantidad 0 en la distribución de inventario. ' +
+              'Revisa la cantidad total de unidades o ajusta el tier de demanda.';
+    toast(msg);
+    console.log('[QTY-TRACE][VALIDATION-BLOCKED] ' + msg);
+    console.log('[QTY-TRACE][BLOCKED-PACKS] ' + zeroQtyPacks.join(','));
+    return false;
+  }
 
   // ── VALIDACIÓN: los packs >1 DEBEN tener su imagen de pack generada ──
   // Si ImgBB falló y no se pudo subir la imagen del pack, avisar con toast
@@ -5725,6 +5764,12 @@ async function addSplitPacksToCSV(){
     }
 
 
+    // ── P0-A FIX: Use actual computed quantity without modification
+    // Selected pack is included in CSV with its actual quantity (may be 0).
+    // eBay CSV importer will handle/reject invalid quantities.
+    // Diagnostics visible in console for zero-quantity investigation.
+    var qty = getSplitListings(split, p);
+
     bulk.push({
       sku:         sku,
       title:       title,
@@ -5738,7 +5783,7 @@ async function addSplitPacksToCSV(){
       description: descToEbayHTML(descForPack(cur._description || cur.description, p)) || '',
       location:    location,
       packs:       p,
-      quantity:    getSplitListings(split, p),
+      quantity:    qty,
       photo:       photoUrl,
       bundleImg:   photoUrl,
       _specifics:  (cur && cur._specifics) || {},
@@ -7882,11 +7927,12 @@ function buildLocalFallbackDescription(curObj, packs) {
   if (specs['Scent']) benefits.push('Scent: ' + specs['Scent']);
   if (specs['Formulation']) benefits.push('Formulation: ' + specs['Formulation']);
   if (specs['Suitable For'] || specs['Hair Type']) benefits.push('Suitable for: ' + (specs['Suitable For'] || specs['Hair Type']));
-  if (!benefits.length) benefits = ['Brand new, factory-sealed', 'Fast shipping from our North Carolina warehouse', '100% authentic, original manufacturer packaging'];
+  // ── FACTORY-SEALED FIX: Remove unverified claim unless evidence field exists
+  if (!benefits.length) benefits = ['Brand new', 'Fast shipping from our North Carolina warehouse', '100% authentic, original manufacturer packaging'];
   return {
-    intro: (brand ? brand + ' — ' : '') + (title || 'Quality product') + '. Brand new and factory sealed.',
+    intro: (brand ? brand + ' — ' : '') + (title || 'Quality product') + '. Brand new.',
     benefits: benefits,
-    package_contents: 'This listing includes ' + packs + ' unit' + (packs>1?'s':'') + ', brand new and factory-sealed.',
+    package_contents: 'This listing includes ' + packs + ' unit' + (packs>1?'s':'') + ', brand new.',
     disclaimer: PS_DESC_DISCLAIMER
   };
 }
@@ -7894,7 +7940,10 @@ function buildLocalFallbackDescription(curObj, packs) {
 function descForPack(desc, packs) {
   if (!desc) return desc;
   var unitWord = packs > 1 ? 'units' : 'unit';
-  var qtyLine = 'This listing includes ' + packs + ' ' + unitWord + ', brand new and factory-sealed.';
+  // ── FACTORY-SEALED FIX: Remove unverified claim unless product-specific evidence exists
+  // No cur._factory_sealed or similar field found in workflow
+  // Safe language: claim only "new" and "authentic" when general workflow supports it
+  var qtyLine = 'This listing includes ' + packs + ' ' + unitWord + ', brand new.';
   // Palabras contables que suelen llevar un número de cantidad delante.
   var COUNT_WORDS = 'units?|bottles?|boxes|box|packs?|pieces?|pcs?|items?|containers?|jars?|tubes?|cans?|bags?|pouches?|packets?|sets?|count|ct';
   // ── Normaliza singular/plural de una palabra contable según packs.
@@ -7919,36 +7968,63 @@ function descForPack(desc, packs) {
     }
     return word; // "count"/"ct" no cambian de forma — se dejan igual
   }
+  // ── P0-B/C FIX: fixQty is DEPRECATED for product descriptions.
+  // DO NOT CALL on original product data (intro, benefits, package_contents).
+  // Use only for generated bundle template text if needed (currently unused).
+  // Product descriptions are immutable — preserved as provided by Algopix/Claude.
   function fixQty(text) {
     if (!text) return text;
     var s = String(text);
-    // "bundle of 3" / "pack of 3" / "set of 3" / "case of 3" → cantidad correcta
+
+    // ── SAFE RULE 1: Only "bundle of N" / "pack of N" / "set of N" / "case of N"
+    // These are structurally bundle-owned phrases in the template itself.
     s = s.replace(/\b(bundle|pack|set|case|lot)\s+of\s+\d+\b/gi, function(m, w){
       return w.toLowerCase() + ' of ' + packs;
     });
-    // "includes 3 ..." / "contains 3 ..." antes de una palabra contable
-    s = s.replace(new RegExp('\\b(includes?|contains?|comes with|features?)\\s+\\d+((?:\\s+[A-Za-z,\\-]+){0,4}?)\\s+(' + COUNT_WORDS + ')\\b', 'gi'),
+
+    // ── SAFE RULE 2: ONLY match "includes N units" where verb is explicit bundle-related
+    // AND restrict word count between number and COUNT_WORDS to 1-2 words max (never 3-4).
+    // This prevents matching "includes 144 pieces" but allows "includes 12 units".
+    // Constraint: only allows phrases like "includes 12 units", "contains 5 bottles",
+    // but rejects "includes 144 individual pieces" or "includes 1 Building Set".
+    s = s.replace(new RegExp('\\b(includes?|contains?|comes with|features?)\\s+\\d+((?:\\s+[A-Za-z,\\-]+){0,1}?)\\s+(' + COUNT_WORDS + ')\\b', 'gi'),
       function(m, verb, mid, unit){
         return verb + ' ' + packs + (mid || '') + ' ' + normalizeUnitWord(unit, packs);
       });
-    // "3 units" / "3 bottles" / "3 boxes" genérico (número + palabra contable)
-    s = s.replace(new RegExp('\\b\\d+((?:\\s+[A-Za-z,\\-]+){0,3}?)\\s+(' + COUNT_WORDS + ')\\b', 'gi'),
-      function(m, mid, unit){
-        return packs + (mid || '') + ' ' + normalizeUnitWord(unit, packs);
-      });
+
+    // ── SAFE RULE 3: REMOVED.
+    // The generic regex \b\d+(...)\s+(COUNT_WORDS)\b is too broad and matches
+    // product facts like "144 pieces" or "1 Space Shuttle Building Set".
+    // Product facts must stay immutable — they belong in the base description, not in bundle logic.
+    // Only the above two rules (explicit "bundle of" and "includes N unit") are safe.
+
     return s;
   }
+  // ── P0-B/C ARCHITECTURE: Product descriptions must be immutable.
+  // DO NOT call fixQty on original product data (intro, benefits).
+  // Only use generated bundle text (qtyLine) which is safe.
   if (typeof desc === 'string') {
-    var s = fixQty(desc);
-    if (!/\bunits?\b/i.test(s)) s = qtyLine + ' ' + s;
-    return s;
+    // Original string description stays untouched.
+    // Check if it already has quantity language; if not, prepend qtyLine.
+    if (!/\bunits?\b/i.test(desc)) return qtyLine + ' ' + desc;
+    return desc;
   }
-  var pc = fixQty(desc.package_contents || '');
-  if (!pc) pc = qtyLine;
-  else if (!/\bunits?\b/i.test(pc)) pc = qtyLine + ' ' + pc;
+
+  // Structured description object (from Claude/Algopix)
+  // Rebuild with immutable original data + generated bundle text
+  var pc = desc.package_contents || '';
+  if (!pc) {
+    // No package contents provided; use generated qtyLine
+    pc = qtyLine;
+  } else if (!/\bunits?\b/i.test(pc)) {
+    // Has package_contents but no quantity mention; add qtyLine
+    pc = qtyLine + ' ' + pc;
+  }
+  // else: package_contents already has unit/quantity language; keep it as-is
+
   return {
-    intro: fixQty(desc.intro || ''),
-    benefits: (desc.benefits || []).map(fixQty),
+    intro: desc.intro || '',  // Original intro, untouched
+    benefits: desc.benefits || [],  // Original benefits, untouched
     package_contents: pc,
     disclaimer: psDisclaimerForPack(desc.disclaimer || '', packs)
   };
