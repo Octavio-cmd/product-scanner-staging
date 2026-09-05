@@ -9765,11 +9765,19 @@ function clShowSession() {
   // Mostrar modal con opciones de export
   const modal = document.createElement('div');
   modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:999;display:flex;align-items:flex-end';
-  modal.innerHTML = `
+  let content = `
     <div style="background:var(--bg);border-radius:18px 18px 0 0;padding:24px;width:100%;max-width:480px;margin:0 auto">
       <div style="font-size:16px;font-weight:800;margin-bottom:4px">📦 Clothing Session</div>
-      <div style="font-size:13px;color:var(--mu);margin-bottom:12px">${ebayCount} item(s) ready</div>
-      <button onclick="clPreviewSession()" style="width:100%;background:none;border:1px solid #555;border-radius:8px;padding:8px;color:var(--mu);font-size:12px;cursor:pointer;margin-bottom:10px">🔍 Preview CSV content (debug)</button>
+      <div style="font-size:13px;color:var(--mu);margin-bottom:12px">${ebayCount} item(s) in eBay export queue</div>`;
+
+  // If no eBay items but clBulk has items, show option to add
+  if (!ebayCount && oldCount) {
+    content += `<button onclick="clAddBulkToEbaySession();this.closest('div[style]').remove();setTimeout(clShowSession,50)" style="width:100%;background:linear-gradient(135deg,#FF6B35,#E71D36);border:none;border-radius:12px;padding:15px;color:#fff;font-size:14px;font-weight:800;cursor:pointer;margin-bottom:10px">
+      ➕ Add ${oldCount} items to eBay export (${oldCount} in staging)
+    </button>`;
+  }
+
+  content += `<button onclick="clPreviewSession()" style="width:100%;background:none;border:1px solid #555;border-radius:8px;padding:8px;color:var(--mu);font-size:12px;cursor:pointer;margin-bottom:10px">🔍 Preview CSV content (debug)</button>
       <div id="cl-url-check" style="background:var(--sf2);border-radius:10px;padding:10px;margin-bottom:12px;font-size:12px;color:var(--mu)">⏳ Checking photo URLs...</div>
 
       <button onclick="this.closest('div[style]').remove();setTimeout(clExportEbayCSV,50)" style="width:100%;background:var(--sv);border:none;border-radius:12px;padding:15px;color:#000;font-size:14px;font-weight:800;cursor:pointer;margin-bottom:10px">
@@ -9780,6 +9788,7 @@ function clShowSession() {
       <button onclick="clClearSession();this.closest('div[style]').remove()" ontouchend="event.preventDefault();clClearSession();this.closest('div[style]').remove()" style="width:100%;background:none;border:1px solid var(--dw);border-radius:10px;padding:10px;color:var(--dw);font-size:13px;cursor:pointer;margin-bottom:8px">🗑 Clear Session (start fresh)</button>
       <button onclick="this.closest('div[style]').remove()" style="width:100%;background:none;border:none;padding:10px;color:var(--mu);font-size:14px;cursor:pointer">Cancel</button>
     </div>`;
+  modal.innerHTML = content;
   document.body.appendChild(modal);
   modal.addEventListener('click', e => { if (e.target === modal) modal.remove(); });
 
@@ -9788,22 +9797,210 @@ function clShowSession() {
     const checkEl = document.getElementById('cl-url-check');
     if (!checkEl) return;
     const sess = JSON.parse(localStorage.getItem('cl_ebay_session') || '[]');
-    const withPhotos = sess.filter(r => r.photos && r.photos.startsWith('https://'));
-    const noPhotos   = sess.filter(r => !r.photos || !r.photos.startsWith('https://'));
-    if (sess.length === 0) {
-      checkEl.innerHTML = '⚠️ No items in session';
+    if (!sess || sess.length === 0) {
+      checkEl.innerHTML = '⚠️ No items in eBay export queue';
       checkEl.style.color = 'var(--dw)';
-    } else if (noPhotos.length === 0) {
+      return;
+    }
+    const withPhotos = sess.filter(r => clGetPrimaryPhotoURL(r.photos));
+    const noPhotos   = sess.filter(r => !clGetPrimaryPhotoURL(r.photos));
+    if (noPhotos.length === 0) {
       checkEl.innerHTML = '✅ All ' + sess.length + ' items have photo URLs — ready for eBay!';
       checkEl.style.color = 'var(--sv)';
     } else {
-      checkEl.innerHTML = '⚠️ ' + noPhotos.length + ' item(s) missing photo URLs (ImgBB not set up when scanned). '
-        + 'Clear session below and re-scan to get photos. ' + withPhotos.length + ' item(s) have photos ✅';
+      checkEl.innerHTML = '⚠️ ' + noPhotos.length + ' item(s) missing photo URLs. '
+        + 'Clear session and re-scan with ImgBB configured. ' + withPhotos.length + ' item(s) have photos ✅';
       checkEl.style.color = 'var(--gd)';
     }
   }, 100);
 }
 
+// Add all items from clBulk to cl_ebay_session
+function clAddBulkToEbaySession() {
+  if (!clBulk || clBulk.length === 0) {
+    toast('⚠️ No items in staging to add');
+    return;
+  }
+  try {
+    localStorage.setItem('cl_ebay_session', JSON.stringify(clBulk));
+    const fabN = document.getElementById('cl-fab-n');
+    if (fabN) fabN.textContent = clBulk.length;
+    toast('✅ Added ' + clBulk.length + ' item(s) to eBay export queue');
+  } catch(e) {
+    toast('❌ Error adding items: ' + e.message);
+  }
+}
+
+// ── CLOTHING & SHOES eBay EXPORT ────────────────────────────
+// Extract primary photo URL from photos object
+function clGetPrimaryPhotoURL(photos) {
+  if (!photos) return null;
+  if (typeof photos === 'string') {
+    // Already a URL
+    return photos.startsWith('https://') ? photos : null;
+  }
+  if (typeof photos === 'object') {
+    // Try in priority order: front, back, tag, detail
+    for (const key of ['front', 'back', 'tag', 'detail']) {
+      const url = photos[key];
+      if (url && typeof url === 'string' && url.startsWith('https://')) {
+        return url;
+      }
+    }
+  }
+  return null;
+}
+
+// Normalize size values for eBay (XXL → 2XL, etc.)
+function clNormalizeSize(size) {
+  if (!size) return size;
+  const normalized = String(size).trim();
+  // Size normalization map for eBay compatibility
+  const sizeMap = {
+    'XXL': '2XL',
+    'XXXL': '3XL',
+    'XXXXL': '4XL',
+    'XXXXXL': '5XL'
+  };
+  return sizeMap[normalized.toUpperCase()] || normalized;
+}
+
+// Preview CSV content (debug function)
+function clPreviewSession() {
+  const sess = JSON.parse(localStorage.getItem('cl_ebay_session') || '[]');
+  if (!sess || sess.length === 0) {
+    toast('⚠️ No items in session');
+    return;
+  }
+  const previewData = sess.map((item, idx) => ({
+    '#': idx + 1,
+    'SKU': item.sku || '?',
+    'Size': item.size || '?',
+    'Photo URL': clGetPrimaryPhotoURL(item.photos) || '(MISSING)',
+    'Title': (item.title || '').substring(0, 50),
+    'Price': item.price || '?'
+  }));
+  const modal = document.createElement('div');
+  modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:999;overflow-y:auto;padding:20px';
+  let html = '<div style="background:var(--bg);border-radius:12px;padding:20px;max-width:600px;margin:0 auto">' +
+    '<div style="font-size:16px;font-weight:800;margin-bottom:12px">CSV Preview (' + sess.length + ' items)</div>' +
+    '<pre style="background:var(--sf);padding:12px;border-radius:8px;overflow-x:auto;font-size:11px;line-height:1.4">';
+  const cols = Object.keys(previewData[0]);
+  html += cols.join(' | ') + '\n';
+  html += '─'.repeat(80) + '\n';
+  previewData.forEach(row => {
+    html += cols.map(col => String(row[col]).substring(0, 20).padEnd(20)).join('') + '\n';
+  });
+  html += '</pre><button onclick="this.closest(\'div\').remove()" style="width:100%;padding:10px;background:var(--sv);border:none;border-radius:8px;color:#000;font-weight:800;cursor:pointer;margin-top:12px">Close</button></div>';
+  modal.innerHTML = html;
+  document.body.appendChild(modal);
+}
+
+// Export session as eBay CSV
+function clExportEbayCSV() {
+  const sess = JSON.parse(localStorage.getItem('cl_ebay_session') || '[]');
+  if (!sess || sess.length === 0) {
+    toast('⚠️ No items in session');
+    return;
+  }
+
+  // Validate: all items must have photo URLs
+  const noPhotos = sess.filter(r => !clGetPrimaryPhotoURL(r.photos));
+  if (noPhotos.length > 0) {
+    const skuList = noPhotos.map(r => r.sku || 'UNKNOWN').join(', ');
+    toast('❌ Export blocked: ' + noPhotos.length + ' item(s) missing photo URLs.\n\nAffected SKUs: ' + skuList + '\n\nRe-scan these items with ImgBB configured, then add them again.');
+    return;
+  }
+
+  // Generate CSV using same headers as main Product Scanner
+  const HDR = [
+    '*Action(SiteID=US|Country=US|Currency=USD|Version=1193|CC=UTF-8)',
+    'CustomLabel','*Category','*Title','*ConditionID','*Description',
+    'PicURL','*Format','*Duration','*StartPrice','*Quantity',
+    'ImmediatePayRequired','*Location','*DispatchTimeMax',
+    'ShippingProfileName','ReturnProfileName','PaymentProfileName',
+    'StoreCategory',
+    '*C:Brand','Product:UPC','C:Type','C:EPA Registration Number','C:Model',
+    'C:Color','C:Language','C:Book Title','C:Author','ISBN',
+    'C:Expiration Date','C:Dosage','C:Shade','C:Connectivity',
+    'C:Size','C:Volume','C:Scent','C:Flavor','C:Formulation','C:Active Ingredients','C:Ingredients',
+    'C:Features','C:Material','C:Number of Doses','C:Suitable For',
+    'C:Fragrance','C:Item Form','C:Country of Origin',
+    'C:Main Purpose','C:Age Group','C:Department',
+    'C:MPN','C:Period After Opening (PAO)','C:Styling Effect','C:Product Line','C:Item Weight','C:Size Type','C:When to Take',
+    'WeightMajor','WeightMinor'
+  ];
+
+  const lines = [
+    'Info,Version=1.0.0,Template=fx_category_template_EBAY_US',
+    HDR.join(',')
+  ];
+
+  sess.forEach(item => {
+    const row = {};
+    row['*Action(SiteID=US|Country=US|Currency=USD|Version=1193|CC=UTF-8)'] = 'AddFixed';
+    row['*Category'] = item.category || '29143'; // Default: Clothing category
+    row['*Title'] = item.title || 'Unknown Item';
+    row['*ConditionID'] = 'Used';
+    row['*Description'] = item.description || item.title || '';
+    row['PicURL'] = clGetPrimaryPhotoURL(item.photos) || ''; // PRIMARY FIX: Populate with actual URL
+    row['*Format'] = 'FixedPrice';
+    row['*Duration'] = '30 Days';
+    row['*StartPrice'] = item.price || '0.01';
+    row['*Quantity'] = item.quantity || '1';
+    row['ImmediatePayRequired'] = 'false';
+    row['*Location'] = item.location || '';
+    row['*DispatchTimeMax'] = '1';
+    row['ShippingProfileName'] = 'Default';
+    row['ReturnProfileName'] = 'Default';
+    row['PaymentProfileName'] = 'Default';
+    row['*C:Brand'] = item.brand || '';
+    row['C:Color'] = item.color || '';
+    row['C:Type'] = item.type || '';
+    row['C:Material'] = item.material || '';
+    // CRITICAL: Normalize size for eBay (XXL → 2XL)
+    row['C:Size'] = item.size ? clNormalizeSize(item.size) : '';
+    row['C:Department'] = item.department || '';
+    row['C:Age Group'] = item.ageGroup || '';
+    row['C:Features'] = item.features || '';
+
+    const rowValues = HDR.map(h => {
+      const val = row[h] || '';
+      const str = String(val).replace(/"/g, '""'); // CSV escape quotes
+      return '"' + str + '"';
+    });
+    lines.push(rowValues.join(','));
+  });
+
+  // Download CSV
+  const csv = lines.join('\n');
+  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+  const link = document.createElement('a');
+  const url = URL.createObjectURL(blob);
+  link.setAttribute('href', url);
+  link.setAttribute('download', 'Clothing-eBay-' + new Date().toISOString().slice(0,10) + '.csv');
+  link.style.visibility = 'hidden';
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  toast('✅ CSV exported: ' + sess.length + ' items');
+
+  // Auto-clear after export
+  setTimeout(() => {
+    localStorage.removeItem('cl_ebay_session');
+    const fabN = document.getElementById('cl-fab-n');
+    if (fabN) fabN.textContent = '0';
+  }, 500);
+}
+
+// Clear session
+function clClearSession() {
+  if (!confirm('🗑 Clear all ' + JSON.parse(localStorage.getItem('cl_ebay_session')||'[]').length + ' items from eBay export session? This cannot be undone.')) return;
+  localStorage.removeItem('cl_ebay_session');
+  const fabN = document.getElementById('cl-fab-n');
+  if (fabN) fabN.textContent = '0';
+  toast('✅ Session cleared');
+}
 
 
 // ── SESSION PERSISTENCE ───────────────────────────────────────
