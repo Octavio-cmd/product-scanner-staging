@@ -9896,6 +9896,44 @@ function clNormalizeSize(size) {
   return original;
 }
 
+// Normalize size type based on eBay category and size value
+// CATEGORY 15689 (Men's Shorts): Evidence-based size type validation
+// Only applies size type corrections when supported by eBay category data
+function clNormalizeSizeType(category, normalizedSize, currentSizeType) {
+  if (!category || !normalizedSize || !currentSizeType) return currentSizeType;
+
+  // Category 15689: Men's Shorts (verified eBay category data)
+  if (category === '15689') {
+    const sizeUpper = String(normalizedSize).toUpperCase();
+
+    // Sizes that MUST be Big & Tall (3XL, 4XL, 5XL, 6XL, 7XL, 8XL)
+    const bigTallSizes = ['3XL', '4XL', '5XL', '6XL', '7XL', '8XL'];
+    if (bigTallSizes.includes(sizeUpper) && currentSizeType === 'Regular') {
+      return 'Big & Tall';
+    }
+
+    // Tall variants (LT, XLT, 2XLT, 3XLT, 4XLT, 5XLT, 6XLT)
+    // These are tall-fit sizes and must use Big & Tall in category 15689
+    // Match: ends with T, and either contains XL or is exactly LT
+    if (sizeUpper.endsWith('T') && (sizeUpper.includes('XL') || sizeUpper === 'LT')) {
+      if (currentSizeType === 'Regular') {
+        return 'Big & Tall';
+      }
+    }
+
+    // Ambiguous sizes (2XL, numeric like 40/42/44) - preserve user choice
+    // These exist in both Regular and Big & Tall, so we don't force a change
+    // XS, S, M, L, XL - always Regular in category 15689
+    const regularSizes = ['XS', 'S', 'M', 'L', 'XL'];
+    if (regularSizes.includes(sizeUpper)) {
+      return 'Regular';
+    }
+  }
+
+  // For other categories or unmapped sizes: preserve unchanged
+  return currentSizeType;
+}
+
 // Preview CSV content (debug function)
 function clPreviewSession() {
   const sess = JSON.parse(localStorage.getItem('cl_ebay_session') || '[]');
@@ -10004,8 +10042,12 @@ function clExportEbayCSV() {
     row['*Title'] = item.title || '';
     row['*ConditionID'] = item.conditionId || '';
     row['*C:Brand'] = item.brand || '';
-    row['*C:Size Type'] = item.sizeType || '';
-    row['*C:Size'] = item.size ? clNormalizeSize(item.size) : '';
+
+    // CRITICAL FIX: Normalize size FIRST, then apply category-specific sizeType rules
+    const normalizedSize = item.size ? clNormalizeSize(item.size) : '';
+    row['*C:Size'] = normalizedSize;
+    row['*C:Size Type'] = clNormalizeSizeType(item.category, normalizedSize, item.sizeType) || '';
+
     row['*C:Department'] = item.department || '';
     row['*C:Color'] = item.color || '';
     row['*C:Style'] = item.style || '';
