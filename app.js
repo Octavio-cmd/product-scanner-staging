@@ -9870,10 +9870,30 @@ function clGetPrimaryPhotoURL(photos) {
 // Normalize size values for eBay (only confirmed: XXL → 2XL)
 function clNormalizeSize(size) {
   if (!size) return size;
-  const normalized = String(size).trim().toUpperCase();
-  // Size normalization: only confirmed mapping from production data
-  if (normalized === 'XXL') return '2XL';
-  return String(size).trim();
+
+  const original = String(size).trim();
+  const normalized = original.toUpperCase().replace(/\s+/g, ' ');
+
+  // Confirmed bilingual Polo Ralph Lauren label (production data):
+  // XS / TP = Extra Small / Très Petit (French equivalent)
+  // Extract canonical size for eBay while preserving physical label in photo
+  if (
+    normalized === 'XS TP' ||
+    normalized === 'XS / TP' ||
+    normalized === 'XS/TP'
+  ) {
+    return 'XS';
+  }
+
+  // Confirmed eBay normalization (production verified)
+  if (normalized === 'XXL') {
+    return '2XL';
+  }
+
+  // IMPORTANT: Preserve all other values unchanged
+  // Do NOT convert 3XLT, 2XLT, numeric sizes, or unknown compound sizes
+  // without explicit production evidence
+  return original;
 }
 
 // Preview CSV content (debug function)
