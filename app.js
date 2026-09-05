@@ -10136,16 +10136,26 @@ function restoreSession() {
       clUpdateClFAB();
     }
 
-    // ── DEFENSIVE CHECK: Separate any Clothing items that ended up in bulk ──
-    // If any SKU starts with CLO-, move it to clBulk to prevent wrong export route
+    // ── DEFENSIVE CHECK: Detect Clothing items in bulk (preserve without schema conversion) ──
+    // If any SKU starts with CLO-, warn the user but DO NOT automatically move it.
+    // Bulk objects may use different schema (photo/bundleImg vs photos.{front,back,tag,detail}).
+    // The exportCSV() guard will block CLO- exports. User must handle in Clothing module.
     const clothingInBulk = bulk.filter(function(it){ return /^CLO-/i.test(it.sku || ''); });
     if (clothingInBulk.length > 0) {
-      clBulk = clBulk.concat(clothingInBulk);
-      bulk = bulk.filter(function(it){ return !/^CLO-/i.test(it.sku || ''); });
-      saveBulkToStorage();
-      saveClBulkToStorage();
-      const movedSKUs = clothingInBulk.map(function(it){ return it.sku; }).join(', ');
-      toast('⚠️ Moved to Clothing & Shoes: ' + movedSKUs);
+      clothingInBulk.forEach(function(clothingItem) {
+        const alreadyInClothing = clBulk.some(function(clItem){ return (clItem.sku || '').toUpperCase() === (clothingItem.sku || '').toUpperCase(); });
+        if (alreadyInClothing) {
+          console.warn('⚠️ SKU already in Clothing & Shoes:', clothingItem.sku);
+        }
+      });
+      const clothingSKUs = clothingInBulk.map(function(it){ return it.sku; }).join('\n');
+      var warnOv = document.createElement('div');
+      warnOv.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.92);z-index:99998;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:24px;gap:12px;text-align:center';
+      warnOv.innerHTML = '<div style="font-size:40px">⚠️</div>'
+        + '<div style="color:#fff;font-size:16px;font-weight:800">Clothing items in session</div>'
+        + '<div style="color:#aaa;font-size:13px;line-height:1.6">The following item(s) were found in Product Scanner but must be handled via Clothing & Shoes:<br><br><code style="background:#1a1a1a;padding:8px;border-radius:6px;display:inline-block;color:#ff9500;font-size:12px">' + clothingSKUs.replace(/\n/g, '<br>') + '</code><br><br>Click the <strong>Clothing & Shoes</strong> tab to process and export these items.<br>Your session has been preserved.</div>'
+        + '<button onclick="this.parentElement.remove()" style="background:linear-gradient(135deg,#FF6B35,#E71D36);border:none;border-radius:10px;padding:12px 24px;color:#fff;cursor:pointer;font-weight:800">OK</button>';
+      document.body.appendChild(warnOv);
     }
 
     toast('✅ Session restored');
