@@ -7229,7 +7229,178 @@ function psPreFillSpecifics(title, category, brand) {
       prefilled['Flavor'] = 'Unflavored';
     }
   }
-  
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // TIER 1 & 2: PRODUCT FORM RESOLUTION (CORRECTED)
+  // Critical fix: Collect Tier 1 and Tier 2 INDEPENDENTLY even if Tier 1 exists,
+  // so conflicts can be detected. Only match specific semantic aspect names,
+  // not generic "form" substrings. No non-health category defaults.
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  var _tier1Form = '';
+  var _tier2Form = '';
+  var _tier2FormSourceAspect = '';
+  var _conflictDetected = false;
+
+  // TIER 1: Extract from immutable title evidence
+  _tier1Form = psDetectIngestibleForm(title) || '';
+
+  // TIER 2: Inspect structured aspects INDEPENDENTLY (ALWAYS, even if tier1 exists)
+  // This is critical for detecting conflicts
+  if (cur && cur.prod && cur.prod.aspects) {
+    var aspectsArray = Array.isArray(cur.prod.aspects)
+      ? cur.prod.aspects
+      : Object.keys(cur.prod.aspects).map(function(k) {
+          return { name: k, value: cur.prod.aspects[k] };
+        });
+
+    // Only match SPECIFIC semantic aspect names (no generic "form" substring)
+    var formAspectNames = ['Formulation', 'Item Form', 'Dosage Form', 'Product Form'];
+
+    for (var ai = 0; ai < aspectsArray.length; ai++) {
+      var aspect = aspectsArray[ai];
+      if (!aspect || !aspect.name || !aspect.value) continue;
+
+      var aspName = String(aspect.name).trim();
+      var aspValue = String(aspect.value).trim();
+      var aspNameNorm = aspName.toLowerCase();
+      var isFormAspect = false;
+
+      // Exact normalized match only
+      for (var fai = 0; fai < formAspectNames.length; fai++) {
+        if (aspNameNorm === formAspectNames[fai].toLowerCase()) {
+          isFormAspect = true;
+          break;
+        }
+      }
+
+      if (isFormAspect && aspValue) {
+        _tier2Form = aspValue;
+        _tier2FormSourceAspect = aspName;
+        break;
+      }
+    }
+  }
+
+  // CONFLICT DETECTION & RESOLUTION
+  var resolvedForm = '';
+  var formSource = '';
+  var conflictInfo = null;
+
+  if (_tier1Form && _tier2Form) {
+    // Normalize both for comparison
+    var normalizePlural = function(w) {
+      w = String(w).toLowerCase();
+      if (w.match(/ies$/)) return w.replace(/ies$/, 'y');
+      if (w.match(/lets$/)) return w.replace(/s$/, '');
+      if (w.match(/gels$/)) return w.replace(/s$/, '');
+      if (w.match(/sules$/)) return w.replace(/s$/, '');
+      if (w.match(/ers$/)) return w.replace(/s$/, '');
+      if (w.match(/els$/)) return w.replace(/s$/, '');
+      if (w.match(/ids$/)) return w.replace(/s$/, '');
+      if (w.match(/ops$/)) return w.replace(/s$/, '');
+      if (w.match(/pes$/)) return w.replace(/s$/, '');
+      if (w.match(/[^aeiou]es$/)) return w.replace(/es$/, '');
+      if (w.match(/s$/)) return w.replace(/s$/, '');
+      return w;
+    };
+
+    var t1Norm = normalizePlural(_tier1Form);
+    var t2Norm = normalizePlural(_tier2Form);
+
+    if (t1Norm === t2Norm) {
+      // Agreement: use with higher confidence
+      resolvedForm = _tier1Form;
+      formSource = 'TIER_1_AND_2_AGREE';
+    } else {
+      // CONFLICT: Do NOT silently resolve
+      // Record conflict internally but mark as unresolved for review
+      _conflictDetected = true;
+      conflictInfo = {
+        tier1: _tier1Form,
+        tier2: _tier2Form,
+        tier2SourceAspect: _tier2FormSourceAspect,
+        policy: 'BLOCKED_FOR_REVIEW',
+        reason: 'Explicit product metadata conflicts: title says ' + _tier1Form +
+                ', structured aspect ' + _tier2FormSourceAspect + ' says ' + _tier2Form
+      };
+      // DO NOT resolve to either value
+      resolvedForm = '';
+      formSource = 'CONFLICT_BLOCKED_REQUIRES_REVIEW';
+    }
+  } else if (_tier1Form) {
+    // Only Tier 1: use it
+    resolvedForm = _tier1Form;
+    formSource = 'DETECTED_IN_TITLE';
+  } else if (_tier2Form) {
+    // Only Tier 2: use it
+    resolvedForm = _tier2Form;
+    formSource = 'STRUCTURED_ASPECT_' + (_tier2FormSourceAspect || 'Form');
+  }
+
+  // DATA-DRIVEN APPLICABILITY GUARD
+  // Check which form fields are actually applicable based on:
+  // 1. Primary: available aspect names in current product data
+  // 2. Secondary: verified category fallback ONLY if no aspects found
+  var applicableFormFields = { formulation: false, itemForm: false };
+
+  if (cur && cur.prod && cur.prod.aspects) {
+    var aspectsArray2 = Array.isArray(cur.prod.aspects)
+      ? cur.prod.aspects
+      : Object.keys(cur.prod.aspects).map(function(k) {
+          return { name: k, value: cur.prod.aspects[k] };
+        });
+
+    var formAspectNames2 = ['Formulation', 'Item Form', 'Dosage Form', 'Product Form'];
+
+    for (var ai2 = 0; ai2 < aspectsArray2.length; ai2++) {
+      var aspect2 = aspectsArray2[ai2];
+      if (!aspect2 || !aspect2.name) continue;
+
+      var aspNameNorm2 = String(aspect2.name).toLowerCase().trim();
+
+      for (var fai2 = 0; fai2 < formAspectNames2.length; fai2++) {
+        if (aspNameNorm2 === formAspectNames2[fai2].toLowerCase()) {
+          if (formAspectNames2[fai2].toLowerCase() === 'formulation' ||
+              formAspectNames2[fai2].toLowerCase() === 'dosage form' ||
+              formAspectNames2[fai2].toLowerCase() === 'product form') {
+            applicableFormFields.formulation = true;
+          } else if (formAspectNames2[fai2].toLowerCase() === 'item form') {
+            applicableFormFields.itemForm = true;
+          }
+          break;
+        }
+      }
+    }
+  }
+
+  // ONLY apply category fallback if NO aspects were found
+  if (!applicableFormFields.formulation && !applicableFormFields.itemForm) {
+    if (typeof window.PS_HEALTH_CATS !== 'undefined' &&
+        window.PS_HEALTH_CATS.indexOf(String(category || '')) !== -1) {
+      applicableFormFields.formulation = true;
+      applicableFormFields.itemForm = true;
+    }
+    // Otherwise: leave both false (do NOT default to formulation = true)
+  }
+
+  // PRE-FILL ONLY applicable fields
+  if (resolvedForm) {
+    if (applicableFormFields.formulation) {
+      prefilled['Formulation'] = resolvedForm;
+    }
+    if (applicableFormFields.itemForm) {
+      prefilled['Item Form'] = resolvedForm;
+    }
+    if (applicableFormFields.formulation || applicableFormFields.itemForm) {
+      prefilled['_formationSource'] = formSource;
+    }
+    // Record conflict info internally (will be filtered before export)
+    if (_conflictDetected && conflictInfo) {
+      prefilled['_conflictInfo'] = JSON.stringify(conflictInfo);
+    }
+  }
+
   // FASE 1.5: Administration + Age Group + Department (género)
   var admin = psExtractAdministration(category);
   if (admin) prefilled['Administration'] = admin;
