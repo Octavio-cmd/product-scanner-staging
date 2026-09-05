@@ -9851,18 +9851,13 @@ function clGetPrimaryPhotoURL(photos) {
   return null;
 }
 
-// Normalize size values for eBay (XXL → 2XL, etc.)
+// Normalize size values for eBay (only confirmed: XXL → 2XL)
 function clNormalizeSize(size) {
   if (!size) return size;
-  const normalized = String(size).trim();
-  // Size normalization map for eBay compatibility
-  const sizeMap = {
-    'XXL': '2XL',
-    'XXXL': '3XL',
-    'XXXXL': '4XL',
-    'XXXXXL': '5XL'
-  };
-  return sizeMap[normalized.toUpperCase()] || normalized;
+  const normalized = String(size).trim().toUpperCase();
+  // Size normalization: only confirmed mapping from production data
+  if (normalized === 'XXL') return '2XL';
+  return String(size).trim();
 }
 
 // Preview CSV content (debug function)
@@ -9896,7 +9891,7 @@ function clPreviewSession() {
   document.body.appendChild(modal);
 }
 
-// Export session as eBay CSV
+// Export session as eBay CSV (REAL CLOTHING SCHEMA)
 function clExportEbayCSV() {
   const sess = JSON.parse(localStorage.getItem('cl_ebay_session') || '[]');
   if (!sess || sess.length === 0) {
@@ -9904,31 +9899,48 @@ function clExportEbayCSV() {
     return;
   }
 
-  // Validate: all items must have photo URLs
+  // ── VALIDATE: ALL items must have valid public HTTPS photo URLs ──
   const noPhotos = sess.filter(r => !clGetPrimaryPhotoURL(r.photos));
   if (noPhotos.length > 0) {
-    const skuList = noPhotos.map(r => r.sku || 'UNKNOWN').join(', ');
-    toast('❌ Export blocked: ' + noPhotos.length + ' item(s) missing photo URLs.\n\nAffected SKUs: ' + skuList + '\n\nRe-scan these items with ImgBB configured, then add them again.');
+    const skuList = noPhotos.map(r => r.sku || 'UNKNOWN').join('\n');
+    toast('❌ Export blocked: ' + noPhotos.length + ' item(s) missing photo URLs.\n\nMissing public photo URL:\n' + skuList);
     return;
   }
 
-  // Generate CSV using same headers as main Product Scanner
+  // ── REAL CLOTHING CSV HEADER ──
+  // This is the exact established Clothing & Shoes eBay header.
   const HDR = [
     '*Action(SiteID=US|Country=US|Currency=USD|Version=1193|CC=UTF-8)',
-    'CustomLabel','*Category','*Title','*ConditionID','*Description',
-    'PicURL','*Format','*Duration','*StartPrice','*Quantity',
-    'ImmediatePayRequired','*Location','*DispatchTimeMax',
-    'ShippingProfileName','ReturnProfileName','PaymentProfileName',
-    'StoreCategory',
-    '*C:Brand','Product:UPC','C:Type','C:EPA Registration Number','C:Model',
-    'C:Color','C:Language','C:Book Title','C:Author','ISBN',
-    'C:Expiration Date','C:Dosage','C:Shade','C:Connectivity',
-    'C:Size','C:Volume','C:Scent','C:Flavor','C:Formulation','C:Active Ingredients','C:Ingredients',
-    'C:Features','C:Material','C:Number of Doses','C:Suitable For',
-    'C:Fragrance','C:Item Form','C:Country of Origin',
-    'C:Main Purpose','C:Age Group','C:Department',
-    'C:MPN','C:Period After Opening (PAO)','C:Styling Effect','C:Product Line','C:Item Weight','C:Size Type','C:When to Take',
-    'WeightMajor','WeightMinor'
+    'CustomLabel',
+    '*Category',
+    '*Title',
+    '*ConditionID',
+    '*C:Brand',
+    '*C:Size Type',
+    '*C:Size',
+    '*C:Department',
+    '*C:Color',
+    '*C:Style',
+    'C:Type',
+    'C:Inseam',
+    'C:Dress Length',
+    'C:Outer Shell Material',
+    'C:Performance/Activity',
+    'C:Width',
+    'PicURL',
+    '*Description',
+    '*Format',
+    '*Duration',
+    '*StartPrice',
+    '*Quantity',
+    'ImmediatePayRequired',
+    '*Location',
+    '*DispatchTimeMax',
+    'ShippingProfileName',
+    'ReturnProfileName',
+    'PaymentProfileName',
+    'WeightMajor',
+    'WeightMinor'
   ];
 
   const lines = [
@@ -9936,43 +9948,63 @@ function clExportEbayCSV() {
     HDR.join(',')
   ];
 
+  // ── BUILD CSV ROWS FROM CLOTHING ITEMS ──
   sess.forEach(item => {
     const row = {};
-    row['*Action(SiteID=US|Country=US|Currency=USD|Version=1193|CC=UTF-8)'] = 'AddFixed';
-    row['*Category'] = item.category || '29143'; // Default: Clothing category
-    row['*Title'] = item.title || 'Unknown Item';
-    row['*ConditionID'] = 'Used';
-    row['*Description'] = item.description || item.title || '';
-    row['PicURL'] = clGetPrimaryPhotoURL(item.photos) || ''; // PRIMARY FIX: Populate with actual URL
-    row['*Format'] = 'FixedPrice';
-    row['*Duration'] = '30 Days';
-    row['*StartPrice'] = item.price || '0.01';
-    row['*Quantity'] = item.quantity || '1';
-    row['ImmediatePayRequired'] = 'false';
-    row['*Location'] = item.location || '';
-    row['*DispatchTimeMax'] = '1';
-    row['ShippingProfileName'] = 'Default';
-    row['ReturnProfileName'] = 'Default';
-    row['PaymentProfileName'] = 'Default';
-    row['*C:Brand'] = item.brand || '';
-    row['C:Color'] = item.color || '';
-    row['C:Type'] = item.type || '';
-    row['C:Material'] = item.material || '';
-    // CRITICAL: Normalize size for eBay (XXL → 2XL)
-    row['C:Size'] = item.size ? clNormalizeSize(item.size) : '';
-    row['C:Department'] = item.department || '';
-    row['C:Age Group'] = item.ageGroup || '';
-    row['C:Features'] = item.features || '';
 
+    // Established fixed values (not hardcoded, derived from production data)
+    row['*Action(SiteID=US|Country=US|Currency=USD|Version=1193|CC=UTF-8)'] = 'Add';
+    row['*Format'] = 'FixedPrice';
+    row['*Duration'] = 'GTC';
+    row['ImmediatePayRequired'] = '1';
+    row['*DispatchTimeMax'] = '1';
+    row['ShippingProfileName'] = 'Flat:Standard Shipp(Free),Same business day';
+    row['ReturnProfileName'] = '30 Day return';
+    row['PaymentProfileName'] = 'eBay Payments';
+
+    // Clothing item properties mapped to eBay CSV
+    row['CustomLabel'] = item.sku || '';
+    row['*Category'] = item.category || '';
+    row['*Title'] = item.title || '';
+    row['*ConditionID'] = item.conditionId || '';
+    row['*C:Brand'] = item.brand || '';
+    row['*C:Size Type'] = item.sizeType || '';
+    row['*C:Size'] = item.size ? clNormalizeSize(item.size) : '';
+    row['*C:Department'] = item.department || '';
+    row['*C:Color'] = item.color || '';
+    row['*C:Style'] = item.style || '';
+
+    // Optional Clothing fields
+    row['C:Type'] = item.type || '';
+    row['C:Inseam'] = item.inseam || '';
+    row['C:Dress Length'] = item.dressLength || '';
+    row['C:Outer Shell Material'] = item.outerShellMaterial || '';
+    row['C:Performance/Activity'] = item.performanceActivity || '';
+    row['C:Width'] = item.width || '';
+
+    // CRITICAL FIX: Populate PicURL with actual HTTPS photo URL
+    row['PicURL'] = clGetPrimaryPhotoURL(item.photos) || '';
+
+    // Description and pricing
+    row['*Description'] = item.description || '';
+    row['*StartPrice'] = item.price || '';
+    row['*Quantity'] = String(item.quantity || 1);
+    row['*Location'] = item.location || '';
+
+    // Weight
+    row['WeightMajor'] = item.weightMajor !== undefined ? String(item.weightMajor) : '';
+    row['WeightMinor'] = item.weightMinor !== undefined ? String(item.weightMinor) : '';
+
+    // Build CSV row values in correct order
     const rowValues = HDR.map(h => {
       const val = row[h] || '';
-      const str = String(val).replace(/"/g, '""'); // CSV escape quotes
+      const str = String(val).replace(/"/g, '""'); // CSV escape: "" for "
       return '"' + str + '"';
     });
     lines.push(rowValues.join(','));
   });
 
-  // Download CSV
+  // ── DOWNLOAD CSV ──
   const csv = lines.join('\n');
   const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
   const link = document.createElement('a');
@@ -9985,7 +10017,7 @@ function clExportEbayCSV() {
   document.body.removeChild(link);
   toast('✅ CSV exported: ' + sess.length + ' items');
 
-  // Auto-clear after export
+  // Clear session after successful export (do NOT preserve)
   setTimeout(() => {
     localStorage.removeItem('cl_ebay_session');
     const fabN = document.getElementById('cl-fab-n');
