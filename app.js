@@ -8638,6 +8638,22 @@ async function exportCSV(){
   try {
   if(!bulk.length){toast('⚠️ No products');return;}
 
+  // ── DEFENSIVE GUARD: Block Clothing items from general Product Scanner export ──
+  // Clothing & Shoes items (SKU prefix CLO-) must be exported via clExportEbayCSV()
+  // to ensure proper photo validation and CSV schema.
+  const clothingItems = bulk.filter(function(it){ return /^CLO-/i.test(it.sku || ''); });
+  if (clothingItems.length > 0) {
+    const clothingSKUs = clothingItems.map(function(it){ return it.sku; }).join('\n');
+    var errOv = document.createElement('div');
+    errOv.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.92);z-index:99999;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:24px;gap:12px;text-align:center';
+    errOv.innerHTML = '<div style="font-size:40px">👕</div>'
+      + '<div style="color:#fff;font-size:16px;font-weight:800">Clothing & Shoes items detected</div>'
+      + '<div style="color:#aaa;font-size:13px;line-height:1.6">The following item(s) must be exported from the Clothing & Shoes module:<br><br><code style="background:#1a1a1a;padding:8px;border-radius:6px;display:inline-block;color:#ff9500;font-size:12px">' + clothingSKUs.replace(/\n/g, '<br>') + '</code><br><br>Click <strong>Clothing & Shoes</strong> tab and use <strong>Exportar a eBay</strong>.</div>'
+      + '<button onclick="this.parentElement.remove()" style="background:linear-gradient(135deg,#FF6B35,#E71D36);border:none;border-radius:10px;padding:12px 24px;color:#fff;cursor:pointer;font-weight:800">Understood</button>';
+    document.body.appendChild(errOv);
+    return;
+  }
+
   // Candado anti doble-tap: evita exports (y filas) duplicados
   if (window._exportLock) { toast('⏳ Export en proceso...'); return; }
   window._exportLock = true;
@@ -10119,6 +10135,19 @@ function restoreSession() {
       clBulk = JSON.parse(clData);
       clUpdateClFAB();
     }
+
+    // ── DEFENSIVE CHECK: Separate any Clothing items that ended up in bulk ──
+    // If any SKU starts with CLO-, move it to clBulk to prevent wrong export route
+    const clothingInBulk = bulk.filter(function(it){ return /^CLO-/i.test(it.sku || ''); });
+    if (clothingInBulk.length > 0) {
+      clBulk = clBulk.concat(clothingInBulk);
+      bulk = bulk.filter(function(it){ return !/^CLO-/i.test(it.sku || ''); });
+      saveBulkToStorage();
+      saveClBulkToStorage();
+      const movedSKUs = clothingInBulk.map(function(it){ return it.sku; }).join(', ');
+      toast('⚠️ Moved to Clothing & Shoes: ' + movedSKUs);
+    }
+
     toast('✅ Session restored');
   } catch(e) {
     toast('❌ Restore failed');
