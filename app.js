@@ -3632,15 +3632,7 @@ function clearExpDate() {
   }
   _dateSelected = false;
   if (window._packState) window._packState.expDate = '';
-  // 🔬 DIAGNOSTIC: clearExpDate title reset
   if (cur) {
-    console.log('🔬 SELECTED TITLE WRITE', {
-      writer: 'clearExpDate',
-      upc: cur.upc,
-      oldValue: cur._selectedTitle,
-      newValue: '',
-      time: performance.now()
-    });
     cur._expDate = '';
     cur._selectedTitle = '';
     cur._countOK = false;
@@ -3751,19 +3743,6 @@ function rebuildAndApplyTitle(n) {
   var titleEl = document.getElementById('pack-title-display');
   if (titleEl) { titleEl.textContent = title; titleEl.dataset.val = title; }
 
-  // 🔬 DIAGNOSTIC: Title rebuild tracking
-  console.log('🔬 SELECTED TITLE REBUILD', {
-    upc: cur && cur.upc,
-    oldValue: cur && cur._selectedTitle,
-    newValue: title,
-    baseTitle: state && state.baseTitle,
-    pack: n || (state && state.curPack),
-    shade: state && state.shade,
-    expDate: state && state.expDate,
-    titleLength: title && title.length,
-    time: performance.now()
-  });
-
   if (cur) cur._selectedTitle = title;
   // Mantener el contador de caracteres sincronizado
   var _cnt = document.getElementById('title-char-count');
@@ -3865,14 +3844,6 @@ function saveTitleEdit() {
   disp.textContent   = newTitle;
   disp.dataset.val   = newTitle;
   if (cur) {
-    // 🔬 DIAGNOSTIC: Manual title edit
-    console.log('🔬 SELECTED TITLE WRITE', {
-      writer: 'saveTitleEdit',
-      upc: cur.upc,
-      oldValue: cur._selectedTitle,
-      newValue: newTitle,
-      time: performance.now()
-    });
     cur._selectedTitle = newTitle;
     cur._titleManual   = true;   // marca que fue editado a mano
   }
@@ -5435,14 +5406,6 @@ async function _addBulkInternal() {
       var _nuevoTitulo = psApplyCount(_tituloActual, _n, (cur && cur.category) || '');
       cur.title = _nuevoTitulo;
       if (cur._selectedTitle) {
-        // 🔬 DIAGNOSTIC: Count correction
-        console.log('🔬 SELECTED TITLE WRITE', {
-          writer: 'countCorrection',
-          upc: cur.upc,
-          oldValue: cur._selectedTitle,
-          newValue: _nuevoTitulo,
-          time: performance.now()
-        });
         cur._selectedTitle = _nuevoTitulo;
       }
       // el Size del item specific sale del mismo número: se invalida para
@@ -6156,17 +6119,6 @@ async function addSplitPacksToCSV(){
     // eBay CSV importer will handle/reject invalid quantities.
     // Diagnostics visible in console for zero-quantity investigation.
     var qty = getSplitListings(split, p);
-
-    // 🔬 CHECKPOINT B — INSTRUMENTATION ONLY
-    console.log('🔬 SPEC TRACE B — BEFORE BULK PUSH', {
-      pack: p,
-      title: title,
-      formulation: cur && cur._specifics && cur._specifics['Formulation'],
-      itemForm: cur && cur._specifics && cur._specifics['Item Form'],
-      flavor: cur && cur._specifics && cur._specifics['Flavor'],
-      setIncludes: cur && cur._specifics && cur._specifics['Set Includes'],
-      fullSpecifics: JSON.parse(JSON.stringify((cur && cur._specifics) || {}))
-    });
 
     bulk.push({
       sku:         sku,
@@ -7669,28 +7621,8 @@ function psScrubHealthSpecs(specs, category, title, upc) {
   var f = String(specs['Formulation'] || '').trim();
   var itf = String(specs['Item Form'] || '').trim();
 
-  // 🔬 DIAGNOSTIC: Form field conflict detection
-  console.log('🔬 psScrubHealthSpecs FORM CHECK', {
-    upc: upc,
-    title: title,
-    formulation: f,
-    itemForm: itf,
-    conflict: (f && itf && f.toLowerCase() !== itf.toLowerCase()),
-    titleContainsFormulation: t.indexOf(f.toLowerCase()) !== -1,
-    titleContainsItemForm: t.indexOf(itf.toLowerCase()) !== -1,
-    time: performance.now()
-  });
-
   if (f && itf && f.toLowerCase() !== itf.toLowerCase()) {
     var win = (t.indexOf(itf.toLowerCase()) !== -1 && t.indexOf(f.toLowerCase()) === -1) ? itf : f;
-    console.log('🔬 psScrubHealthSpecs FORM CONFLICT RESOLUTION', {
-      upc: upc,
-      oldFormulation: f,
-      oldItemForm: itf,
-      winner: win,
-      reason: (t.indexOf(itf.toLowerCase()) !== -1 && t.indexOf(f.toLowerCase()) === -1) ? 'ItemForm in title, Formulation not' : 'Formulation wins',
-      time: performance.now()
-    });
     specs['Formulation'] = win;
     specs['Item Form']   = win;
   }
@@ -7771,19 +7703,6 @@ function psScrubSpecs(specs, category, title) {
 // de eBay. Devuelve solo los specifics que aplican; el resto quedan vacíos.
 // Guarda el resultado en cur._specifics (un objeto {nombre: valor}).
 async function psGenerateSpecifics(source){
-  // 🔬 DIAGNOSTIC: Call origin tracking
-  console.log('🔬 SPEC CALL ORIGIN', {
-    source: source || 'UNKNOWN',
-    upc: cur && cur.upc,
-    curTitle: cur && cur.title,
-    selectedTitle: cur && cur._selectedTitle,
-    titleForAI_computed: (cur && (cur._selectedTitle || cur.title || ''))
-      .replace(/\s*Pack of \d+\s*/gi,' ')
-      .replace(/\s*New\s*$/i,'')
-      .trim(),
-    time: performance.now()
-  });
-
   if(!cur) { toast('⚠️ Escanea un producto primero'); return; }
   if(!savvyToken()){ toast('\uD83D\uDD11 Inicia sesion para usar Claude'); return; }
 
@@ -7855,17 +7774,6 @@ async function psGenerateSpecifics(source){
     var clean = {};
     var count = 0;
 
-    // 🔬 DIAGNOSTIC: Pre-canonical state before restoration
-    console.log('🔬 STAGE 1: PRE-RESTORATION', {
-      upc: cur && cur.upc,
-      cleanBefore: JSON.parse(JSON.stringify(clean)),
-      canonicalExists: !!(cur._canonicalSpecifics && cur._canonicalSpecificsLocked),
-      canonicalFormulation: cur._canonicalSpecifics && cur._canonicalSpecifics['Formulation'],
-      canonicalItemForm: cur._canonicalSpecifics && cur._canonicalSpecifics['Item Form'],
-      canonicalFlavor: cur._canonicalSpecifics && cur._canonicalSpecifics['Flavor'],
-      time: performance.now()
-    });
-
     // FIX #4: Restore immutable canonical specifics from previous generation
     // This prevents user confirmation from being overwritten by manual review with changed title
     if (cur._canonicalSpecifics && cur._canonicalSpecificsLocked) {
@@ -7877,27 +7785,7 @@ async function psGenerateSpecifics(source){
       }
     }
 
-    // 🔬 DIAGNOSTIC: After canonical restoration
-    console.log('🔬 STAGE 2: AFTER CANONICAL RESTORE', {
-      upc: cur && cur.upc,
-      cleanAfterRestore: JSON.parse(JSON.stringify(clean)),
-      formulation: clean['Formulation'],
-      itemForm: clean['Item Form'],
-      flavor: clean['Flavor'],
-      time: performance.now()
-    });
-
     // FASE 1: Empezar con prefilled values (pre-parsed del título, 100% confiables)
-    // 🔬 DIAGNOSTIC: Log prefilled BEFORE merge
-    console.log('🔬 STAGE 3: PREFILLED BEFORE MERGE', {
-      upc: cur && cur.upc,
-      prefilled: JSON.parse(JSON.stringify(prefilled)),
-      prefilledFormulation: prefilled['Formulation'],
-      prefilledItemForm: prefilled['Item Form'],
-      prefilledFlavor: prefilled['Flavor'],
-      time: performance.now()
-    });
-
     for(var pk in prefilled){
       if(prefilled.hasOwnProperty(pk)){
         clean[pk] = String(prefilled[pk]).substring(0, 65);
@@ -7905,16 +7793,7 @@ async function psGenerateSpecifics(source){
       }
     }
 
-    // 🔬 DIAGNOSTIC: After prefilled merge
-    console.log('🔬 STAGE 4: AFTER PREFILLED MERGE', {
-      upc: cur && cur.upc,
-      cleanAfterPrefilled: JSON.parse(JSON.stringify(clean)),
-      formulation: clean['Formulation'],
-      itemForm: clean['Item Form'],
-      flavor: clean['Flavor'],
-      time: performance.now()
-    });
-    
+
     // Luego agregar/sobreescribir con respuesta de Claude (excepto los que ya están en prefilled)
     // AND excepto fields que están protected due to conflicts
     // FIX #4B: Also skip Claude values for immutable canonical fields (protect first generation)
@@ -7927,16 +7806,6 @@ async function psGenerateSpecifics(source){
       'Dosage',
       'Dosage or Strength'
     ];
-
-    // 🔬 DIAGNOSTIC: Claude response before merge
-    console.log('🔬 STAGE 5: CLAUDE RESPONSE', {
-      upc: cur && cur.upc,
-      parsed: JSON.parse(JSON.stringify(parsed)),
-      claudeFormulation: parsed['Formulation'],
-      claudeItemForm: parsed['Item Form'],
-      claudeFlavor: parsed['Flavor'],
-      time: performance.now()
-    });
 
     for(var k in parsed){
       if(!parsed.hasOwnProperty(k)) continue;
@@ -7952,12 +7821,6 @@ async function psGenerateSpecifics(source){
 
       // FIX #4B: Skip immutable canonical fields if they're already in clean (from restoration)
       if (IMMUTABLE_FIELDS.indexOf(k) !== -1 && clean.hasOwnProperty(k)) {
-        console.log('🔬 SKIPPING IMMUTABLE FIELD', {
-          field: k,
-          claudeValue: parsed[k],
-          cleanValue: clean[k],
-          reason: 'Field already in clean from canonical restoration'
-        });
         continue; // Skip: immutable field already cached from canonical, don't override
       }
 
@@ -7968,15 +7831,6 @@ async function psGenerateSpecifics(source){
       }
     }
 
-    // 🔬 DIAGNOSTIC: After Claude merge
-    console.log('🔬 STAGE 6: AFTER CLAUDE MERGE', {
-      upc: cur && cur.upc,
-      cleanAfterClaude: JSON.parse(JSON.stringify(clean)),
-      formulation: clean['Formulation'],
-      itemForm: clean['Item Form'],
-      flavor: clean['Flavor'],
-      time: performance.now()
-    });
     // ── RESPALDO DETERMINÍSTICO: "Dosage" es OBLIGATORIO en eBay para
     // categorías de medicina/OTC/suplementos — si falta, el listado
     // NO se publica (error 21919303, bloqueante, no solo de calidad).
@@ -7999,59 +7853,15 @@ async function psGenerateSpecifics(source){
       }
     }
 
-    // 🔬 DIAGNOSTIC: Before scrubbing
-    console.log('🔬 STAGE 7: BEFORE SCRUBBING', {
-      upc: cur && cur.upc,
-      cleanBeforeScrub: JSON.parse(JSON.stringify(clean)),
-      formulation: clean['Formulation'],
-      itemForm: clean['Item Form'],
-      flavor: clean['Flavor'],
-      time: performance.now()
-    });
-
     // Filtrar valores inventados antes de guardar (ver psScrubSpecs).
     clean = psScrubSpecs(clean, catForAI, titleForAI);
-
-    // 🔬 DIAGNOSTIC: After psScrubSpecs
-    console.log('🔬 STAGE 8: AFTER psScrubSpecs', {
-      upc: cur && cur.upc,
-      cleanAfterScrubSpecs: JSON.parse(JSON.stringify(clean)),
-      formulation: clean['Formulation'],
-      itemForm: clean['Item Form'],
-      flavor: clean['Flavor'],
-      time: performance.now()
-    });
 
     // Para salud se usa el título COMPLETO (cur._selectedTitle/cur.title),
     // no titleForAI, porque este último recorta "Pack of N" y podría
     // esconder un tamaño o una unidad que sí queremos poder verificar.
     var _fullTitle = (cur && (cur._selectedTitle || cur.title)) || titleForAI;
 
-    // 🔬 DIAGNOSTIC: psScrubHealthSpecs inputs
-    console.log('🔬 STAGE 9: psScrubHealthSpecs INPUTS', {
-      upc: cur && cur.upc,
-      fullTitle: _fullTitle,
-      selectedTitle: cur && cur._selectedTitle,
-      curTitle: cur && cur.title,
-      category: catForAI,
-      cleanBeforeHealthScrub: JSON.parse(JSON.stringify(clean)),
-      formulation: clean['Formulation'],
-      itemForm: clean['Item Form'],
-      flavor: clean['Flavor'],
-      time: performance.now()
-    });
-
     clean = psScrubHealthSpecs(clean, catForAI, _fullTitle, (cur && cur.upc) || '');
-
-    // 🔬 DIAGNOSTIC: After psScrubHealthSpecs
-    console.log('🔬 STAGE 10: AFTER psScrubHealthSpecs', {
-      upc: cur && cur.upc,
-      cleanAfterHealthScrub: JSON.parse(JSON.stringify(clean)),
-      formulation: clean['Formulation'],
-      itemForm: clean['Item Form'],
-      flavor: clean['Flavor'],
-      time: performance.now()
-    });
 
     // FORMATION STATUS: extract and store separately for CSV blocking logic
     if (clean['_formationStatus']) {
@@ -8087,19 +7897,6 @@ async function psGenerateSpecifics(source){
       });
       cur._canonicalSpecificsLocked = true;
     }
-
-    // 🔬 CHECKPOINT A — INSTRUMENTATION ONLY
-    console.log('🔬 SPEC TRACE A — AFTER GENERATION', {
-      sku: cur && cur.upc,
-      title: cur && cur.title,
-      selectedTitle: cur && cur._selectedTitle,
-      formulation: cur && cur._specifics && cur._specifics['Formulation'],
-      itemForm: cur && cur._specifics && cur._specifics['Item Form'],
-      flavor: cur && cur._specifics && cur._specifics['Flavor'],
-      setIncludes: cur && cur._specifics && cur._specifics['Set Includes'],
-      formationStatus: cur && cur._formationStatus,
-      fullSpecifics: JSON.parse(JSON.stringify(cur._specifics || {}))
-    });
 
     renderSpecificsPreview(clean);
     toast('✅ ' + count + ' especificaciones agregadas');
@@ -8290,15 +8087,6 @@ function renderDescriptionHTML(desc){
 }
 
 function renderResult(r){
-  // 🔬 DIAGNOSTIC: renderResult entry tracking
-  console.log('🔬 RENDER RESULT ENTRY', {
-    upc: r && r.upc,
-    incomingTitle: r && r.title,
-    currentSelectedTitle: cur && cur._selectedTitle,
-    currentTitle: cur && cur.title,
-    time: performance.now()
-  });
-
   if(!r)return;
   const sv=r.verdict==='SAVVY';
   const ebay=r.ebay||{};
@@ -8967,17 +8755,6 @@ function descForPack(desc, packs, curObj) {
     productName = curObj._canonicalProductName;
     productName = productName.trim();
 
-    // ── INSTRUMENTATION: Trace "Pack of 2 New" source (BUG #4 verification) ──
-    // Trigger if RAW title contains marketplace metadata (before sanitization)
-    var rawTitleForTrace = (curObj.prod && curObj.prod.title) || curObj.title || '';
-    if (rawTitleForTrace.indexOf('Pack of') >= 0 && rawTitleForTrace.indexOf('New') >= 0) {
-      console.log('✅ BUG #4 FIX VERIFICATION — Marketplace Metadata Sanitization:');
-      console.log('  RAW (immutable source):', rawTitleForTrace);
-      console.log('  CANONICAL (used in descriptions):', productName);
-      console.log('  Removed: "Pack of X [Condition]" terminal patterns');
-      console.log('  packs:', packs);
-      console.log('  curObj.sku:', curObj.sku);
-    }
   }
 
   // ── Generate package_contents with clean architecture (no duplication) ──
@@ -9841,19 +9618,6 @@ async function exportCSV(){
     _itSpecs = psScrubSpecs(_itSpecs, _finalCat, it.title);
     _itSpecs = psScrubHealthSpecs(_itSpecs, _finalCat, it.title, it.upc || it.sku || '');
 
-    // 🔬 CHECKPOINT C — INSTRUMENTATION ONLY
-    console.log('🔬 SPEC TRACE C — CSV EXPORT', {
-      sku: it.sku,
-      pack: it.packs,
-      title: it.title,
-      formulation: _itSpecs['Formulation'],
-      itemForm: _itSpecs['Item Form'],
-      flavor: _itSpecs['Flavor'],
-      setIncludes: _itSpecs['Set Includes'],
-      formationStatus: it._formationStatus,
-      fullSpecifics: JSON.parse(JSON.stringify(_itSpecs || {}))
-    });
-
     // Detectar Connectivity del título automáticamente
     var _tl = (it.title || '').toLowerCase();
     if (/bitty boomer|bittyboomers/i.test(_tl))        connectivityVal = 'Bluetooth';
@@ -9995,22 +9759,6 @@ async function exportCSV(){
     }
     function _specForCol(col){ return _specByCol[col] || ''; }
 
-    // 🔍 CHECKPOINT D — SPEC_COL_MAP & SPEC_BY_COL TRACE (POST-SCRUB)
-    console.log('🔬 SPEC TRACE D — SPEC_COL_MAP CONSTRUCTION', {
-      sku: it.sku,
-      pack: it.packs,
-      _itSpecs_Flavor: _itSpecs['Flavor'],
-      _itSpecs_Formulation: _itSpecs['Formulation'],
-      _itSpecs_ItemForm: _itSpecs['Item Form'],
-      _specByCol_C_Flavor: _specByCol['C:Flavor'],
-      _specByCol_C_Formulation: _specByCol['C:Formulation'],
-      _specByCol_C_ItemForm: _specByCol['C:Item Form'],
-      _specForCol_C_Flavor: _specForCol('C:Flavor'),
-      _specForCol_C_Formulation: _specForCol('C:Formulation'),
-      _specForCol_C_ItemForm: _specForCol('C:Item Form'),
-      fullSpecByCol: JSON.parse(JSON.stringify(_specByCol || {}))
-    });
-
     var _rawUpc = String((it.upc || '')).replace(/[^0-9]/g, '');
     if (!_rawUpc && it.sku) {
       // SKU formato BRAND-UPC-Npk → sacar el bloque de dígitos más largo
@@ -10055,20 +9803,6 @@ async function exportCSV(){
     var departmentVal = _specForCol('C:Department') || psExtractGenderDepartment(it.title);
 
     // 🔍 CHECKPOINT E — VALUES BEFORE lines.push (PRE-CSV SERIALIZATION)
-    console.log('🔬 SPEC TRACE E — FINAL VALUES BEFORE CSV ROW', {
-      sku: it.sku,
-      pack: it.packs,
-      flavorVal: flavorVal,
-      formulationVal: formulationVal,
-      itemFormVal: itemFormVal,
-      activeIngredientsVal: activeIngredientsVal,
-      ingredientsVal: ingredientsVal,
-      ageGroupVal: ageGroupVal,
-      departmentVal: departmentVal,
-      _formationStatus: it._formationStatus,
-      note: 'These are the exact values that will be pushed to lines array'
-    });
-
     lines.push([
       'Add',
       it.sku||'',
@@ -10143,19 +9877,6 @@ async function exportCSV(){
     var firstDataLine = csvLines[2];
     var firstDataCols = firstDataLine.split(',');
 
-    console.log('🔬 SPEC TRACE F — CSV STRING ANALYSIS', {
-      note: 'Checking CSV header positions and first data row values',
-      headerLength: headerCols.length,
-      dataRowLength: firstDataCols.length,
-      flavorIdx: flavorIdx,
-      formulationIdx: formulationIdx,
-      itemFormIdx: itemFormIdx,
-      flavorValue: flavorIdx >= 0 ? firstDataCols[flavorIdx] : 'NOT_FOUND',
-      formulationValue: formulationIdx >= 0 ? firstDataCols[formulationIdx] : 'NOT_FOUND',
-      itemFormValue: itemFormIdx >= 0 ? firstDataCols[itemFormIdx] : 'NOT_FOUND',
-      csvLineCount: csvLines.length,
-      sampleHeaderCols: headerCols.slice(32, 45)
-    });
   }
 
   var now  = new Date();
