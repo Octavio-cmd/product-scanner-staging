@@ -7386,6 +7386,7 @@ function psPreFillSpecifics(title, category, brand) {
 
   // PRE-FILL ONLY applicable fields
   if (resolvedForm) {
+    // RESOLVED case: set canonical form values
     if (applicableFormFields.formulation) {
       prefilled['Formulation'] = resolvedForm;
     }
@@ -7395,8 +7396,19 @@ function psPreFillSpecifics(title, category, brand) {
     if (applicableFormFields.formulation || applicableFormFields.itemForm) {
       prefilled['_formationSource'] = formSource;
     }
-    // Record conflict info internally (will be filtered before export)
-    if (_conflictDetected && conflictInfo) {
+  } else if (_conflictDetected) {
+    // CONFLICT case: mark form fields as LOCKED from AI inference
+    // Do NOT set values, but DO set lock flags so Claude knows not to fill them
+    prefilled['_formationLocked'] = true;
+    prefilled['_formationStatus'] = 'CONFLICT_REQUIRES_REVIEW';
+    if (applicableFormFields.formulation) {
+      prefilled['_formulation_protected'] = true;
+    }
+    if (applicableFormFields.itemForm) {
+      prefilled['_itemForm_protected'] = true;
+    }
+    prefilled['_formationSource'] = formSource;
+    if (conflictInfo) {
       prefilled['_conflictInfo'] = JSON.stringify(conflictInfo);
     }
   }
@@ -7729,9 +7741,19 @@ async function psGenerateSpecifics(){
     }
     
     // Luego agregar/sobreescribir con respuesta de Claude (excepto los que ya están en prefilled)
+    // AND excepto fields que están protected due to conflicts
     for(var k in parsed){
       if(!parsed.hasOwnProperty(k)) continue;
       if(prefilled.hasOwnProperty(k)) continue; // Skip si ya fue pre-parsed
+
+      // NEW: Check if field is protected due to conflict
+      if (k === 'Formulation' && prefilled['_formulation_protected']) {
+        continue; // Skip: Product Form conflict requires review, Claude forbidden
+      }
+      if (k === 'Item Form' && prefilled['_itemForm_protected']) {
+        continue; // Skip: Product Form conflict requires review, Claude forbidden
+      }
+
       var val = String(parsed[k] == null ? '' : parsed[k]).trim();
       if(val && SUPPORTED.indexOf(k) !== -1){
         clean[k] = val.substring(0, 65); // eBay limita valores de specifics
@@ -7767,6 +7789,15 @@ async function psGenerateSpecifics(){
     // esconder un tamaño o una unidad que sí queremos poder verificar.
     var _fullTitle = (cur && (cur._selectedTitle || cur.title)) || titleForAI;
     clean = psScrubHealthSpecs(clean, catForAI, _fullTitle, (cur && cur.upc) || '');
+
+    // FORMATION STATUS: extract and store separately for CSV blocking logic
+    if (clean['_formationStatus']) {
+      cur._formationStatus = clean['_formationStatus'];
+    }
+    if (clean['_formationLocked']) {
+      cur._formationLocked = clean['_formationLocked'];
+    }
+
     cur._specifics = clean;
 
     renderSpecificsPreview(clean);
@@ -7792,15 +7823,132 @@ function renderSpecificsPreview(specs){
     box.innerHTML = '';
     return;
   }
-  var rows = Object.keys(specs).map(function(k){
+
+  // ── CHECK FOR PRODUCT FORM CONFLICT ──
+  if (specs['_formationStatus'] === 'CONFLICT_REQUIRES_REVIEW' && specs['_conflictInfo']) {
+    try {
+      var conflictObj = JSON.parse(specs['_conflictInfo']);
+      showProductFormConflictModal(conflictObj);
+      // Still show other specs below, but conflict takes priority
+    } catch(e) {
+      console.error('Failed to parse conflict info:', e);
+    }
+  }
+
+  // Filter out internal metadata fields before rendering
+  var displaySpecs = {};
+  for (var k in specs) {
+    if (!specs.hasOwnProperty(k)) continue;
+    if (k.startsWith('_')) continue;  // Skip all internal fields starting with underscore
+    displaySpecs[k] = specs[k];
+  }
+
+  var rows = Object.keys(displaySpecs).map(function(k){
     return '<div style="display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid var(--bd)">'
       + '<span style="color:var(--tx2);font-size:12px">' + k + '</span>'
-      + '<span style="font-size:12px;font-weight:700;text-align:right;max-width:60%">' + specs[k] + '</span></div>';
+      + '<span style="font-size:12px;font-weight:700;text-align:right;max-width:60%">' + displaySpecs[k] + '</span></div>';
   }).join('');
   box.innerHTML = '<div style="background:var(--sf2);border-radius:8px;padding:10px;margin-top:8px">'
     + '<div style="color:var(--ac);font-size:11px;font-weight:800;margin-bottom:6px">✅ ESPECIFICACIONES (IA)</div>'
     + rows + '</div>';
 }
+
+// ── PRODUCT FORM CONFLICT RESOLUTION MODAL ──
+// User chooses between conflicting Tier 1 (title) and Tier 2 (eBay aspects) values
+function showProductFormConflictModal(conflictObj) {
+  if (!conflictObj || !conflictObj.tier1 || !conflictObj.tier2) {
+    console.error('Invalid conflict object:', conflictObj);
+    return;
+  }
+
+  var tier1 = conflictObj.tier1;
+  var tier2 = conflictObj.tier2;
+  var tier2Source = conflictObj.tier2SourceAspect || 'eBay aspects';
+
+  // Create or reuse overlay container
+  var overlay = document.getElementById('product-form-conflict-overlay');
+  if (!overlay) {
+    overlay = document.createElement('div');
+    overlay.id = 'product-form-conflict-overlay';
+    overlay.className = 'ov on';
+    document.body.appendChild(overlay);
+  }
+
+  // Build modal content
+  var html = `
+    <div class="ovc" style="background:var(--sf);border-radius:16px;padding:20px;max-width:500px;margin:50% auto">
+      <div class="ovh" style="display:flex;justify-content:space-between;align-items:center;margin-bottom:18px">
+        <div class="ovt" style="font-size:18px;font-weight:800">⚠️ Product Form Conflict</div>
+      </div>
+
+      <div style="background:rgba(255,109,31,.1);border:1px solid rgba(255,109,31,.3);border-radius:10px;padding:14px;margin-bottom:18px;font-size:13px;line-height:1.6">
+        <div style="color:var(--ac);font-weight:800;margin-bottom:6px">Different sources disagree:</div>
+        <div style="margin-bottom:8px">
+          <div style="color:var(--mu);font-size:11px;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:2px">Title says:</div>
+          <div style="font-weight:700;font-size:15px">${esc(tier1)}</div>
+        </div>
+        <div>
+          <div style="color:var(--mu);font-size:11px;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:2px">${esc(tier2Source)} say:</div>
+          <div style="font-weight:700;font-size:15px">${esc(tier2)}</div>
+        </div>
+      </div>
+
+      <div style="margin-bottom:18px;color:var(--mu);font-size:13px;line-height:1.6">
+        <div style="margin-bottom:8px">
+          You reviewed the actual product. Which form is correct?
+        </div>
+        <div style="font-size:11px;color:#888">
+          Your choice will be used for CSV export and all pack sizes.
+        </div>
+      </div>
+
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+        <button onclick="confirmProductFormChoice('${esc(tier1)}', 'USER_CONFIRMED')"
+                style="background:linear-gradient(135deg,#00e676,#00c853);border:none;border-radius:10px;padding:12px;color:#000;font-weight:800;font-size:14px;cursor:pointer">
+          ✓ It's <strong>${esc(tier1)}</strong>
+        </button>
+        <button onclick="confirmProductFormChoice('${esc(tier2)}', 'USER_CONFIRMED')"
+                style="background:linear-gradient(135deg,#64b5f6,#2196f3);border:none;border-radius:10px;padding:12px;color:#fff;font-weight:800;font-size:14px;cursor:pointer">
+          ✓ It's <strong>${esc(tier2)}</strong>
+        </button>
+      </div>
+    </div>
+  `;
+
+  overlay.innerHTML = html;
+  overlay.classList.add('on');
+  overlay.style.display = 'block';
+}
+window.showProductFormConflictModal = showProductFormConflictModal;
+
+// Handle user's product form choice - update specifics and close modal
+function confirmProductFormChoice(chosenValue, status) {
+  if (!cur || !cur._specifics) {
+    console.error('No current product loaded');
+    return;
+  }
+
+  // Update specifics with user's confirmed choice
+  cur._specifics['Formulation'] = chosenValue;
+  cur._specifics['Item Form'] = chosenValue;
+  cur._formationStatus = status;
+  cur._formationSource = 'USER_CONFIRMED';
+  cur._formationLocked = false;  // No longer locked — user confirmed
+
+  // Close modal
+  var overlay = document.getElementById('product-form-conflict-overlay');
+  if (overlay) {
+    overlay.classList.remove('on');
+    overlay.style.display = 'none';
+  }
+
+  // Show confirmation toast
+  toast('✅ Confirmed: Product Form = ' + chosenValue);
+
+  // Refresh the specifics display to remove conflict state
+  renderSpecificsPreview(cur._specifics);
+}
+window.confirmProductFormChoice = confirmProductFormChoice;
 
 // Convierte la descripción estructurada en HTML para mostrar + copiar
 function renderDescriptionHTML(desc){
@@ -8446,8 +8594,22 @@ function descForPack(desc, packs, curObj) {
     // Use the original product title from curObj.prod (immutable, before any eBay transformations)
     // or fall back to curObj.title (base title before pack-specific modifications)
     // Never use curObj._selectedTitle as it contains pack-specific "Pack of N" and "New" suffixes
-    productName = (curObj.prod && curObj.prod.title) || (curObj.title || '');
+    var prodTitle = (curObj.prod && curObj.prod.title) || '';
+    var curTitle = curObj.title || '';
+    productName = prodTitle || curTitle;
     productName = productName.trim();
+
+    // ── INSTRUMENTATION: Trace "Pack of 2 New" source ──
+    if (productName.indexOf('Pack of') >= 0 && productName.indexOf('New') >= 0) {
+      console.log('🔍 PACK OF N NEW SOURCE TRACE:');
+      console.log('  packs:', packs);
+      console.log('  curObj.prod.title:', prodTitle);
+      console.log('  curObj.title:', curTitle);
+      console.log('  curObj._selectedTitle:', curObj._selectedTitle || '(not set)');
+      console.log('  selectedProductName:', productName);
+      console.log('  curObj.sku:', curObj.sku);
+      console.log('  Stack:', new Error().stack.split('\n').slice(1, 4).join(' | '));
+    }
   }
 
   // ── Generate package_contents with clean architecture (no duplication) ──
@@ -9269,6 +9431,26 @@ async function exportCSV(){
       toast('⚠️ SKU ' + (it.sku||'') + ' — sin título válido, omitido del CSV');
       return;
     }
+
+    // ── NUEVA: BLOQUEAR EXPORT SI PRODUCT FORM ESTÁ EN CONFLICTO ──
+    // Si Product Form tiene Tier 1 vs Tier 2 conflict (e.g., title=Gummy, aspect=Tablet),
+    // el sistema NO puede exportar sin revisión del usuario. Bloquear y informar.
+    if (it._formationStatus === 'CONFLICT_REQUIRES_REVIEW' || it._formationLocked) {
+      skipped++;
+      var conflictInfoStr = (it._specifics && it._specifics._conflictInfo) ? it._specifics._conflictInfo : 'unknown conflict';
+      try {
+        var conflictObj = JSON.parse(conflictInfoStr);
+        var conflictMsg = '⚠️ ' + (it.sku || it.title || 'Product') + ' — Product Form conflict:\n'
+          + '  Título dice: ' + conflictObj.tier1 + '\n'
+          + '  Datos eBay dicen: ' + conflictObj.tier2 + '\n'
+          + '  Acción: Abre el producto y confirma el formato real en el icono 📋.';
+        toast(conflictMsg);
+      } catch(e) {
+        toast('⚠️ ' + (it.sku || it.title || 'Product') + ' — Product Form conflict requiere revisión');
+      }
+      return;
+    }
+
     var pics = it.bundleImg || it.photo || it.imgUrl || '';
     var typeVal   = detectType(String(it.category), it.title);
     var epaVal    = getEpaNumber(String(it.category), it.title);
@@ -9442,14 +9624,13 @@ async function exportCSV(){
       upcVal = _rawUpc;
     }
 
-    // ── Formulation / Item Form: cuando el título dice explícitamente la
-    // forma del producto (Softgel, Capsule, Tablet, Gummy, etc.), esa es la
-    // fuente de verdad — más confiable que lo que adivine la IA. Solo se usa
-    // el valor de la IA cuando el título no lo deja claro (cremas, geles,
-    // líquidos tópicos donde no aplica este detector).
-    var _ingestibleForm = psDetectIngestibleForm(it.title);
-    var formulationVal = _ingestibleForm || _specForCol('C:Formulation');
-    var itemFormVal     = _ingestibleForm || _specForCol('C:Item Form');
+    // ── Formulation / Item Form: CANONICAL SOURCE ONLY ──
+    // FIX: Do NOT re-infer from it.title (presentation field that may be compressed).
+    // Read ONLY from canonical specifics resolved during scanning.
+    // Product Form is resolved BEFORE title compression, not after.
+    // If Product Form is unresolved/conflict, export is already blocked above.
+    var formulationVal = _specForCol('C:Formulation');
+    var itemFormVal = _specForCol('C:Item Form');
 
     // ── Active Ingredients / Ingredients: quitar la dosis del nombre del
     // ingrediente (ej. "Magnesium 400mg" → "Magnesium"). La dosis ya vive
@@ -9458,15 +9639,13 @@ async function exportCSV(){
     var activeIngredientsVal = psStripDosageFromIngredient(_specForCol('C:Active Ingredients'));
     var ingredientsVal       = psStripDosageFromIngredient(_specForCol('C:Ingredients')) || activeIngredientsVal;
 
-    // ── Flavor / Department: mismo respaldo que Formulation — se calculan
-    // de nuevo aquí con el TÍTULO FINAL (it.title). La generación automática
-    // de specifics corre 900ms después de escanear y a veces el título aún
-    // no tiene su forma definitiva (ej. sin "Softgels" todavía) — por eso
-    // Flavor podía quedar vacío aunque la lógica en sí esté bien. Al
-    // recalcular aquí, en el momento de exportar, siempre usa el título
-    // ya terminado.
+    // ── Flavor / Department: read from canonical specifics ──
+    // FIX: Only infer Unflavored if Product Form is RESOLVED (not in conflict).
+    // Flavor inference should not happen if Product Form is unresolved.
     var flavorVal = _specForCol('C:Flavor');
-    if (!flavorVal && _ingestibleForm && _ingestibleForm !== 'Gummy') {
+    if (!flavorVal && formulationVal && formulationVal !== 'Gummy' &&
+        formulationVal !== '' && it._formationStatus !== 'CONFLICT_REQUIRES_REVIEW') {
+      // Only set Unflavored if we have a RESOLVED product form that isn't Gummy
       flavorVal = 'Unflavored';
     }
     // ⚠️ 15 ago 2026: aunque psScrubSpecs borre "Age Group" de los specifics,
