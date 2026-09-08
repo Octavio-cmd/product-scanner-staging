@@ -9722,6 +9722,22 @@ async function exportCSV(){
     }
     function _specForCol(col){ return _specByCol[col] || ''; }
 
+    // 🔍 CHECKPOINT D — SPEC_COL_MAP & SPEC_BY_COL TRACE (POST-SCRUB)
+    console.log('🔬 SPEC TRACE D — SPEC_COL_MAP CONSTRUCTION', {
+      sku: it.sku,
+      pack: it.packs,
+      _itSpecs_Flavor: _itSpecs['Flavor'],
+      _itSpecs_Formulation: _itSpecs['Formulation'],
+      _itSpecs_ItemForm: _itSpecs['Item Form'],
+      _specByCol_C_Flavor: _specByCol['C:Flavor'],
+      _specByCol_C_Formulation: _specByCol['C:Formulation'],
+      _specByCol_C_ItemForm: _specByCol['C:Item Form'],
+      _specForCol_C_Flavor: _specForCol('C:Flavor'),
+      _specForCol_C_Formulation: _specForCol('C:Formulation'),
+      _specForCol_C_ItemForm: _specForCol('C:Item Form'),
+      fullSpecByCol: JSON.parse(JSON.stringify(_specByCol || {}))
+    });
+
     var _rawUpc = String((it.upc || '')).replace(/[^0-9]/g, '');
     if (!_rawUpc && it.sku) {
       // SKU formato BRAND-UPC-Npk → sacar el bloque de dígitos más largo
@@ -9764,6 +9780,21 @@ async function exportCSV(){
       ageGroupVal = psExtractDepartment(it.title);
     }
     var departmentVal = _specForCol('C:Department') || psExtractGenderDepartment(it.title);
+
+    // 🔍 CHECKPOINT E — VALUES BEFORE lines.push (PRE-CSV SERIALIZATION)
+    console.log('🔬 SPEC TRACE E — FINAL VALUES BEFORE CSV ROW', {
+      sku: it.sku,
+      pack: it.packs,
+      flavorVal: flavorVal,
+      formulationVal: formulationVal,
+      itemFormVal: itemFormVal,
+      activeIngredientsVal: activeIngredientsVal,
+      ingredientsVal: ingredientsVal,
+      ageGroupVal: ageGroupVal,
+      departmentVal: departmentVal,
+      _formationStatus: it._formationStatus,
+      note: 'These are the exact values that will be pushed to lines array'
+    });
 
     lines.push([
       'Add',
@@ -9824,6 +9855,36 @@ async function exportCSV(){
   });
 
   var csv  = lines.join('\r\n');
+
+  // 🔍 CHECKPOINT F — CSV STRING ANALYSIS (POST-SERIALIZATION)
+  // Parse CSV to check if Flavor/Formulation/Item Form columns have correct values
+  var csvLines = csv.split('\r\n');
+  if (csvLines.length > 2) {  // Skip Info and Header lines
+    var headerLine = csvLines[1];
+    var headerCols = headerLine.split(',');
+    var flavorIdx = headerCols.indexOf('C:Flavor');
+    var formulationIdx = headerCols.indexOf('C:Formulation');
+    var itemFormIdx = headerCols.indexOf('C:Item Form');
+
+    // Sample first data row
+    var firstDataLine = csvLines[2];
+    var firstDataCols = firstDataLine.split(',');
+
+    console.log('🔬 SPEC TRACE F — CSV STRING ANALYSIS', {
+      note: 'Checking CSV header positions and first data row values',
+      headerLength: headerCols.length,
+      dataRowLength: firstDataCols.length,
+      flavorIdx: flavorIdx,
+      formulationIdx: formulationIdx,
+      itemFormIdx: itemFormIdx,
+      flavorValue: flavorIdx >= 0 ? firstDataCols[flavorIdx] : 'NOT_FOUND',
+      formulationValue: formulationIdx >= 0 ? firstDataCols[formulationIdx] : 'NOT_FOUND',
+      itemFormValue: itemFormIdx >= 0 ? firstDataCols[itemFormIdx] : 'NOT_FOUND',
+      csvLineCount: csvLines.length,
+      sampleHeaderCols: headerCols.slice(32, 45)
+    });
+  }
+
   var now  = new Date();
   var stamp = now.getFullYear()+'-'
     + String(now.getMonth()+1).padStart(2,'0')+'-'
