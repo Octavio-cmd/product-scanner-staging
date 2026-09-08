@@ -5580,6 +5580,8 @@ async function _doAddBulk(usedTitle, usedSKU, usedPrice, shade, expDate, locatio
     photo:       photoUrl,
     bundleImg:   photoUrl,
     _specifics:  (cur && cur._specifics) || {},
+    _formationStatus: (cur && cur._formationStatus) || null,
+    _formationLocked: (cur && cur._formationLocked) || false,
     scannedBy:   SAVVY_CURRENT_USER || 'unknown'
   });
   saveBulkToStorage();
@@ -6117,6 +6119,8 @@ async function addSplitPacksToCSV(){
       photo:       photoUrl,
       bundleImg:   photoUrl,
       _specifics:  (cur && cur._specifics) || {},
+      _formationStatus: (cur && cur._formationStatus) || null,
+      _formationLocked: (cur && cur._formationLocked) || false,
       weightLb:    _pkgLb,
       weightMajor: _wMajor,
       weightMinor: _wMinor,
@@ -7384,6 +7388,11 @@ function psPreFillSpecifics(title, category, brand) {
     // Otherwise: leave both false (do NOT default to formulation = true)
   }
 
+  // Store applicable fields on cur for later use (e.g., user confirmation)
+  if (cur) {
+    cur._applicableFormFields = applicableFormFields;
+  }
+
   // PRE-FILL ONLY applicable fields
   if (resolvedForm) {
     // RESOLVED case: set canonical form values
@@ -7825,6 +7834,7 @@ function renderSpecificsPreview(specs){
   }
 
   // ── CHECK FOR PRODUCT FORM CONFLICT ──
+  // ONLY show modal if conflict is UNRESOLVED (not if user already confirmed)
   if (specs['_formationStatus'] === 'CONFLICT_REQUIRES_REVIEW' && specs['_conflictInfo']) {
     try {
       var conflictObj = JSON.parse(specs['_conflictInfo']);
@@ -7834,6 +7844,7 @@ function renderSpecificsPreview(specs){
       console.error('Failed to parse conflict info:', e);
     }
   }
+  // Do NOT show modal if _formationStatus === 'USER_CONFIRMED' (already resolved)
 
   // Filter out internal metadata fields before rendering
   var displaySpecs = {};
@@ -7928,12 +7939,27 @@ function confirmProductFormChoice(chosenValue, status) {
     return;
   }
 
-  // Update specifics with user's confirmed choice
-  cur._specifics['Formulation'] = chosenValue;
-  cur._specifics['Item Form'] = chosenValue;
+  // Get applicable fields for this category
+  var applicable = cur._applicableFormFields || { formulation: false, itemForm: false };
+
+  // Update specifics ONLY for applicable fields
+  if (applicable.formulation) {
+    cur._specifics['Formulation'] = chosenValue;
+  }
+  if (applicable.itemForm) {
+    cur._specifics['Item Form'] = chosenValue;
+  }
+
+  // Update status in BOTH locations for consistency
+  // Canonical location: cur._specifics (used by renderSpecificsPreview)
+  cur._specifics['_formationStatus'] = status;
+  cur._specifics['_formationSource'] = 'USER_CONFIRMED';
+  cur._specifics['_formationLocked'] = false;  // No longer locked
+
+  // Duplicate location for CSV export validation (line 9438 checks it._formationStatus)
   cur._formationStatus = status;
   cur._formationSource = 'USER_CONFIRMED';
-  cur._formationLocked = false;  // No longer locked — user confirmed
+  cur._formationLocked = false;
 
   // Close modal
   var overlay = document.getElementById('product-form-conflict-overlay');
