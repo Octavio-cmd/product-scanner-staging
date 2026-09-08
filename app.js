@@ -5099,6 +5099,15 @@ async function finishAnalyze(upc, prod, ebayFull, stepIn){
     cur._bundleImg=null;
     cur._titleManual=false; // el producto nuevo NO hereda edición manual del anterior
     _lastBundleUrl = '';
+
+    // FIX #1: Materialize canonical product identity from immutable marketplace source
+    // This is captured ONCE per scan and never mutated by presentation/SEO changes
+    if (!cur._canonicalProductName) {
+      cur._canonicalProductName = psCanonicalProductName(cur.prod && cur.prod.title ? cur.prod.title : res.title);
+    }
+    // Clear any cached canonical specifics from previous product (new scan = new product)
+    cur._canonicalSpecifics = undefined;
+    cur._canonicalSpecificsLocked = false;
     try {
       renderResult(res);
       screen('res');
@@ -7761,7 +7770,11 @@ async function psGenerateSpecifics(source){
   var origBtnHtml = btn ? btn.innerHTML : '';
   if(btn){ btn.disabled = true; btn.innerHTML = '⏳ Revisando...'; }
 
-  var titleForAI = (cur._selectedTitle || cur.title || '').replace(/\s*Pack of \d+\s*/gi,' ').replace(/\s*New\s*$/i,'').trim();
+  // FIX #2: Use CANONICAL product identity for AI analysis, not presentation title
+  // cur._selectedTitle may be shortened by rebuildTitle() for SEO purposes
+  // cur._canonicalProductName is immutable marketplace source, never affected by title optimization
+  var canonicalTitle = cur._canonicalProductName || psCanonicalProductName(cur.title || '');
+  var titleForAI = canonicalTitle.replace(/\s*Pack of \d+\s*/gi,' ').replace(/\s*New\s*$/i,'').trim();
   var brandForAI = cur.brand || '';
   var catForAI   = String(cur.category || '');
   
@@ -7820,7 +7833,18 @@ async function psGenerateSpecifics(source){
     // Guardar solo pares válidos (nombre soportado + valor no vacío)
     var clean = {};
     var count = 0;
-    
+
+    // FIX #4: Restore immutable canonical specifics from previous generation
+    // This prevents user confirmation from being overwritten by manual review with changed title
+    if (cur._canonicalSpecifics && cur._canonicalSpecificsLocked) {
+      for (var canonicalKey in cur._canonicalSpecifics) {
+        if (cur._canonicalSpecifics.hasOwnProperty(canonicalKey)) {
+          clean[canonicalKey] = cur._canonicalSpecifics[canonicalKey];
+          count++;
+        }
+      }
+    }
+
     // FASE 1: Empezar con prefilled values (pre-parsed del título, 100% confiables)
     for(var pk in prefilled){
       if(prefilled.hasOwnProperty(pk)){
@@ -7831,6 +7855,17 @@ async function psGenerateSpecifics(source){
     
     // Luego agregar/sobreescribir con respuesta de Claude (excepto los que ya están en prefilled)
     // AND excepto fields que están protected due to conflicts
+    // FIX #4B: Also skip Claude values for immutable canonical fields (protect first generation)
+    var IMMUTABLE_FIELDS = [
+      'Formulation',
+      'Item Form',
+      'Flavor',
+      'Active Ingredients',
+      'Count',
+      'Dosage',
+      'Dosage or Strength'
+    ];
+
     for(var k in parsed){
       if(!parsed.hasOwnProperty(k)) continue;
       if(prefilled.hasOwnProperty(k)) continue; // Skip si ya fue pre-parsed
@@ -7841,6 +7876,11 @@ async function psGenerateSpecifics(source){
       }
       if (k === 'Item Form' && prefilled['_itemForm_protected']) {
         continue; // Skip: Product Form conflict requires review, Claude forbidden
+      }
+
+      // FIX #4B: Skip immutable canonical fields if they're already in clean (from restoration)
+      if (IMMUTABLE_FIELDS.indexOf(k) !== -1 && clean.hasOwnProperty(k)) {
+        continue; // Skip: immutable field already cached from canonical, don't override
       }
 
       var val = String(parsed[k] == null ? '' : parsed[k]).trim();
@@ -7888,6 +7928,31 @@ async function psGenerateSpecifics(source){
     }
 
     cur._specifics = clean;
+
+    // FIX #3: Materialize canonical specifics (immutable base product facts)
+    // Protect these from being overwritten by subsequent reviews/regenerations
+    if (!cur._canonicalSpecificsLocked) {
+      if (!cur._canonicalSpecifics) {
+        cur._canonicalSpecifics = {};
+      }
+      // Define which fields are immutable base product facts
+      var IMMUTABLE_FIELDS = [
+        'Formulation',
+        'Item Form',
+        'Flavor',
+        'Active Ingredients',
+        'Count',
+        'Dosage',
+        'Dosage or Strength'
+      ];
+      // Cache immutable values from this generation
+      IMMUTABLE_FIELDS.forEach(function(field) {
+        if (clean.hasOwnProperty(field) && clean[field]) {
+          cur._canonicalSpecifics[field] = clean[field];
+        }
+      });
+      cur._canonicalSpecificsLocked = true;
+    }
 
     // 🔬 CHECKPOINT A — INSTRUMENTATION ONLY
     console.log('🔬 SPEC TRACE A — AFTER GENERATION', {
@@ -8038,9 +8103,15 @@ function confirmProductFormChoice(chosenValue, status) {
   // Update specifics ONLY for applicable fields
   if (applicable.formulation) {
     cur._specifics['Formulation'] = chosenValue;
+    // FIX #5: User confirmation updates canonical specifics (highest authority)
+    if (!cur._canonicalSpecifics) cur._canonicalSpecifics = {};
+    cur._canonicalSpecifics['Formulation'] = chosenValue;
   }
   if (applicable.itemForm) {
     cur._specifics['Item Form'] = chosenValue;
+    // FIX #5: User confirmation updates canonical specifics (highest authority)
+    if (!cur._canonicalSpecifics) cur._canonicalSpecifics = {};
+    cur._canonicalSpecifics['Item Form'] = chosenValue;
   }
 
   // Update status in BOTH locations for consistency
