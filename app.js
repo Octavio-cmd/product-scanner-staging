@@ -6102,6 +6102,17 @@ async function addSplitPacksToCSV(){
     // Diagnostics visible in console for zero-quantity investigation.
     var qty = getSplitListings(split, p);
 
+    // 🔬 CHECKPOINT B — INSTRUMENTATION ONLY
+    console.log('🔬 SPEC TRACE B — BEFORE BULK PUSH', {
+      pack: p,
+      title: title,
+      formulation: cur && cur._specifics && cur._specifics['Formulation'],
+      itemForm: cur && cur._specifics && cur._specifics['Item Form'],
+      flavor: cur && cur._specifics && cur._specifics['Flavor'],
+      setIncludes: cur && cur._specifics && cur._specifics['Set Includes'],
+      fullSpecifics: JSON.parse(JSON.stringify((cur && cur._specifics) || {}))
+    });
+
     bulk.push({
       sku:         sku,
       title:       title,
@@ -7818,6 +7829,19 @@ async function psGenerateSpecifics(){
     }
 
     cur._specifics = clean;
+
+    // 🔬 CHECKPOINT A — INSTRUMENTATION ONLY
+    console.log('🔬 SPEC TRACE A — AFTER GENERATION', {
+      sku: cur && cur.upc,
+      title: cur && cur.title,
+      selectedTitle: cur && cur._selectedTitle,
+      formulation: cur && cur._specifics && cur._specifics['Formulation'],
+      itemForm: cur && cur._specifics && cur._specifics['Item Form'],
+      flavor: cur && cur._specifics && cur._specifics['Flavor'],
+      setIncludes: cur && cur._specifics && cur._specifics['Set Includes'],
+      formationStatus: cur && cur._formationStatus,
+      fullSpecifics: JSON.parse(JSON.stringify(cur._specifics || {}))
+    });
 
     renderSpecificsPreview(clean);
     toast('✅ ' + count + ' especificaciones agregadas');
@@ -9543,6 +9567,19 @@ async function exportCSV(){
     // caminos, incluidos productos guardados antes de este arreglo.
     _itSpecs = psScrubSpecs(_itSpecs, _finalCat, it.title);
     _itSpecs = psScrubHealthSpecs(_itSpecs, _finalCat, it.title, it.upc || it.sku || '');
+
+    // 🔬 CHECKPOINT C — INSTRUMENTATION ONLY
+    console.log('🔬 SPEC TRACE C — CSV EXPORT', {
+      sku: it.sku,
+      pack: it.packs,
+      title: it.title,
+      formulation: _itSpecs['Formulation'],
+      itemForm: _itSpecs['Item Form'],
+      flavor: _itSpecs['Flavor'],
+      setIncludes: _itSpecs['Set Includes'],
+      formationStatus: it._formationStatus,
+      fullSpecifics: JSON.parse(JSON.stringify(_itSpecs || {}))
+    });
 
     // Detectar Connectivity del título automáticamente
     var _tl = (it.title || '').toLowerCase();
