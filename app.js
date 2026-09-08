@@ -7668,8 +7668,29 @@ function psScrubHealthSpecs(specs, category, title, upc) {
   //    en el título; si ninguna aparece, gana Formulation.
   var f = String(specs['Formulation'] || '').trim();
   var itf = String(specs['Item Form'] || '').trim();
+
+  // 🔬 DIAGNOSTIC: Form field conflict detection
+  console.log('🔬 psScrubHealthSpecs FORM CHECK', {
+    upc: upc,
+    title: title,
+    formulation: f,
+    itemForm: itf,
+    conflict: (f && itf && f.toLowerCase() !== itf.toLowerCase()),
+    titleContainsFormulation: t.indexOf(f.toLowerCase()) !== -1,
+    titleContainsItemForm: t.indexOf(itf.toLowerCase()) !== -1,
+    time: performance.now()
+  });
+
   if (f && itf && f.toLowerCase() !== itf.toLowerCase()) {
     var win = (t.indexOf(itf.toLowerCase()) !== -1 && t.indexOf(f.toLowerCase()) === -1) ? itf : f;
+    console.log('🔬 psScrubHealthSpecs FORM CONFLICT RESOLUTION', {
+      upc: upc,
+      oldFormulation: f,
+      oldItemForm: itf,
+      winner: win,
+      reason: (t.indexOf(itf.toLowerCase()) !== -1 && t.indexOf(f.toLowerCase()) === -1) ? 'ItemForm in title, Formulation not' : 'Formulation wins',
+      time: performance.now()
+    });
     specs['Formulation'] = win;
     specs['Item Form']   = win;
   }
@@ -7834,6 +7855,17 @@ async function psGenerateSpecifics(source){
     var clean = {};
     var count = 0;
 
+    // 🔬 DIAGNOSTIC: Pre-canonical state before restoration
+    console.log('🔬 STAGE 1: PRE-RESTORATION', {
+      upc: cur && cur.upc,
+      cleanBefore: JSON.parse(JSON.stringify(clean)),
+      canonicalExists: !!(cur._canonicalSpecifics && cur._canonicalSpecificsLocked),
+      canonicalFormulation: cur._canonicalSpecifics && cur._canonicalSpecifics['Formulation'],
+      canonicalItemForm: cur._canonicalSpecifics && cur._canonicalSpecifics['Item Form'],
+      canonicalFlavor: cur._canonicalSpecifics && cur._canonicalSpecifics['Flavor'],
+      time: performance.now()
+    });
+
     // FIX #4: Restore immutable canonical specifics from previous generation
     // This prevents user confirmation from being overwritten by manual review with changed title
     if (cur._canonicalSpecifics && cur._canonicalSpecificsLocked) {
@@ -7845,13 +7877,43 @@ async function psGenerateSpecifics(source){
       }
     }
 
+    // 🔬 DIAGNOSTIC: After canonical restoration
+    console.log('🔬 STAGE 2: AFTER CANONICAL RESTORE', {
+      upc: cur && cur.upc,
+      cleanAfterRestore: JSON.parse(JSON.stringify(clean)),
+      formulation: clean['Formulation'],
+      itemForm: clean['Item Form'],
+      flavor: clean['Flavor'],
+      time: performance.now()
+    });
+
     // FASE 1: Empezar con prefilled values (pre-parsed del título, 100% confiables)
+    // 🔬 DIAGNOSTIC: Log prefilled BEFORE merge
+    console.log('🔬 STAGE 3: PREFILLED BEFORE MERGE', {
+      upc: cur && cur.upc,
+      prefilled: JSON.parse(JSON.stringify(prefilled)),
+      prefilledFormulation: prefilled['Formulation'],
+      prefilledItemForm: prefilled['Item Form'],
+      prefilledFlavor: prefilled['Flavor'],
+      time: performance.now()
+    });
+
     for(var pk in prefilled){
       if(prefilled.hasOwnProperty(pk)){
         clean[pk] = String(prefilled[pk]).substring(0, 65);
         count++;
       }
     }
+
+    // 🔬 DIAGNOSTIC: After prefilled merge
+    console.log('🔬 STAGE 4: AFTER PREFILLED MERGE', {
+      upc: cur && cur.upc,
+      cleanAfterPrefilled: JSON.parse(JSON.stringify(clean)),
+      formulation: clean['Formulation'],
+      itemForm: clean['Item Form'],
+      flavor: clean['Flavor'],
+      time: performance.now()
+    });
     
     // Luego agregar/sobreescribir con respuesta de Claude (excepto los que ya están en prefilled)
     // AND excepto fields que están protected due to conflicts
@@ -7865,6 +7927,16 @@ async function psGenerateSpecifics(source){
       'Dosage',
       'Dosage or Strength'
     ];
+
+    // 🔬 DIAGNOSTIC: Claude response before merge
+    console.log('🔬 STAGE 5: CLAUDE RESPONSE', {
+      upc: cur && cur.upc,
+      parsed: JSON.parse(JSON.stringify(parsed)),
+      claudeFormulation: parsed['Formulation'],
+      claudeItemForm: parsed['Item Form'],
+      claudeFlavor: parsed['Flavor'],
+      time: performance.now()
+    });
 
     for(var k in parsed){
       if(!parsed.hasOwnProperty(k)) continue;
@@ -7880,6 +7952,12 @@ async function psGenerateSpecifics(source){
 
       // FIX #4B: Skip immutable canonical fields if they're already in clean (from restoration)
       if (IMMUTABLE_FIELDS.indexOf(k) !== -1 && clean.hasOwnProperty(k)) {
+        console.log('🔬 SKIPPING IMMUTABLE FIELD', {
+          field: k,
+          claudeValue: parsed[k],
+          cleanValue: clean[k],
+          reason: 'Field already in clean from canonical restoration'
+        });
         continue; // Skip: immutable field already cached from canonical, don't override
       }
 
@@ -7889,6 +7967,16 @@ async function psGenerateSpecifics(source){
         count++;
       }
     }
+
+    // 🔬 DIAGNOSTIC: After Claude merge
+    console.log('🔬 STAGE 6: AFTER CLAUDE MERGE', {
+      upc: cur && cur.upc,
+      cleanAfterClaude: JSON.parse(JSON.stringify(clean)),
+      formulation: clean['Formulation'],
+      itemForm: clean['Item Form'],
+      flavor: clean['Flavor'],
+      time: performance.now()
+    });
     // ── RESPALDO DETERMINÍSTICO: "Dosage" es OBLIGATORIO en eBay para
     // categorías de medicina/OTC/suplementos — si falta, el listado
     // NO se publica (error 21919303, bloqueante, no solo de calidad).
@@ -7911,13 +7999,59 @@ async function psGenerateSpecifics(source){
       }
     }
 
+    // 🔬 DIAGNOSTIC: Before scrubbing
+    console.log('🔬 STAGE 7: BEFORE SCRUBBING', {
+      upc: cur && cur.upc,
+      cleanBeforeScrub: JSON.parse(JSON.stringify(clean)),
+      formulation: clean['Formulation'],
+      itemForm: clean['Item Form'],
+      flavor: clean['Flavor'],
+      time: performance.now()
+    });
+
     // Filtrar valores inventados antes de guardar (ver psScrubSpecs).
     clean = psScrubSpecs(clean, catForAI, titleForAI);
+
+    // 🔬 DIAGNOSTIC: After psScrubSpecs
+    console.log('🔬 STAGE 8: AFTER psScrubSpecs', {
+      upc: cur && cur.upc,
+      cleanAfterScrubSpecs: JSON.parse(JSON.stringify(clean)),
+      formulation: clean['Formulation'],
+      itemForm: clean['Item Form'],
+      flavor: clean['Flavor'],
+      time: performance.now()
+    });
+
     // Para salud se usa el título COMPLETO (cur._selectedTitle/cur.title),
     // no titleForAI, porque este último recorta "Pack of N" y podría
     // esconder un tamaño o una unidad que sí queremos poder verificar.
     var _fullTitle = (cur && (cur._selectedTitle || cur.title)) || titleForAI;
+
+    // 🔬 DIAGNOSTIC: psScrubHealthSpecs inputs
+    console.log('🔬 STAGE 9: psScrubHealthSpecs INPUTS', {
+      upc: cur && cur.upc,
+      fullTitle: _fullTitle,
+      selectedTitle: cur && cur._selectedTitle,
+      curTitle: cur && cur.title,
+      category: catForAI,
+      cleanBeforeHealthScrub: JSON.parse(JSON.stringify(clean)),
+      formulation: clean['Formulation'],
+      itemForm: clean['Item Form'],
+      flavor: clean['Flavor'],
+      time: performance.now()
+    });
+
     clean = psScrubHealthSpecs(clean, catForAI, _fullTitle, (cur && cur.upc) || '');
+
+    // 🔬 DIAGNOSTIC: After psScrubHealthSpecs
+    console.log('🔬 STAGE 10: AFTER psScrubHealthSpecs', {
+      upc: cur && cur.upc,
+      cleanAfterHealthScrub: JSON.parse(JSON.stringify(clean)),
+      formulation: clean['Formulation'],
+      itemForm: clean['Item Form'],
+      flavor: clean['Flavor'],
+      time: performance.now()
+    });
 
     // FORMATION STATUS: extract and store separately for CSV blocking logic
     if (clean['_formationStatus']) {
