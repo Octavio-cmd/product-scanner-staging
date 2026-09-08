@@ -3632,7 +3632,21 @@ function clearExpDate() {
   }
   _dateSelected = false;
   if (window._packState) window._packState.expDate = '';
-  if (cur) { cur._expDate = ''; cur._selectedTitle = ''; cur._countOK = false; cur._countConfirmed = null; cur._medidaOK = false; }
+  // 🔬 DIAGNOSTIC: clearExpDate title reset
+  if (cur) {
+    console.log('🔬 SELECTED TITLE WRITE', {
+      writer: 'clearExpDate',
+      upc: cur.upc,
+      oldValue: cur._selectedTitle,
+      newValue: '',
+      time: performance.now()
+    });
+    cur._expDate = '';
+    cur._selectedTitle = '';
+    cur._countOK = false;
+    cur._countConfirmed = null;
+    cur._medidaOK = false;
+  }
   var el = document.getElementById('date-result-display');
   if (el) el.innerHTML = '';
   // Regenerar título sin fecha
@@ -3736,6 +3750,20 @@ function rebuildAndApplyTitle(n) {
   }
   var titleEl = document.getElementById('pack-title-display');
   if (titleEl) { titleEl.textContent = title; titleEl.dataset.val = title; }
+
+  // 🔬 DIAGNOSTIC: Title rebuild tracking
+  console.log('🔬 SELECTED TITLE REBUILD', {
+    upc: cur && cur.upc,
+    oldValue: cur && cur._selectedTitle,
+    newValue: title,
+    baseTitle: state && state.baseTitle,
+    pack: n || (state && state.curPack),
+    shade: state && state.shade,
+    expDate: state && state.expDate,
+    titleLength: title && title.length,
+    time: performance.now()
+  });
+
   if (cur) cur._selectedTitle = title;
   // Mantener el contador de caracteres sincronizado
   var _cnt = document.getElementById('title-char-count');
@@ -3837,6 +3865,14 @@ function saveTitleEdit() {
   disp.textContent   = newTitle;
   disp.dataset.val   = newTitle;
   if (cur) {
+    // 🔬 DIAGNOSTIC: Manual title edit
+    console.log('🔬 SELECTED TITLE WRITE', {
+      writer: 'saveTitleEdit',
+      upc: cur.upc,
+      oldValue: cur._selectedTitle,
+      newValue: newTitle,
+      time: performance.now()
+    });
     cur._selectedTitle = newTitle;
     cur._titleManual   = true;   // marca que fue editado a mano
   }
@@ -5389,7 +5425,17 @@ async function _addBulkInternal() {
     if (_n !== _det.num) {
       var _nuevoTitulo = psApplyCount(_tituloActual, _n, (cur && cur.category) || '');
       cur.title = _nuevoTitulo;
-      if (cur._selectedTitle) cur._selectedTitle = _nuevoTitulo;
+      if (cur._selectedTitle) {
+        // 🔬 DIAGNOSTIC: Count correction
+        console.log('🔬 SELECTED TITLE WRITE', {
+          writer: 'countCorrection',
+          upc: cur.upc,
+          oldValue: cur._selectedTitle,
+          newValue: _nuevoTitulo,
+          time: performance.now()
+        });
+        cur._selectedTitle = _nuevoTitulo;
+      }
       // el Size del item specific sale del mismo número: se invalida para
       // que se regenere con el valor corregido
       if (cur._specifics) { delete cur._specifics['Size']; }
@@ -7694,7 +7740,20 @@ function psScrubSpecs(specs, category, title) {
 // que Advantage II = Imidacloprid 9.1%) y qué specifics pide cada categoría
 // de eBay. Devuelve solo los specifics que aplican; el resto quedan vacíos.
 // Guarda el resultado en cur._specifics (un objeto {nombre: valor}).
-async function psGenerateSpecifics(){
+async function psGenerateSpecifics(source){
+  // 🔬 DIAGNOSTIC: Call origin tracking
+  console.log('🔬 SPEC CALL ORIGIN', {
+    source: source || 'UNKNOWN',
+    upc: cur && cur.upc,
+    curTitle: cur && cur.title,
+    selectedTitle: cur && cur._selectedTitle,
+    titleForAI_computed: (cur && (cur._selectedTitle || cur.title || ''))
+      .replace(/\s*Pack of \d+\s*/gi,' ')
+      .replace(/\s*New\s*$/i,'')
+      .trim(),
+    time: performance.now()
+  });
+
   if(!cur) { toast('⚠️ Escanea un producto primero'); return; }
   if(!savvyToken()){ toast('\uD83D\uDD11 Inicia sesion para usar Claude'); return; }
 
@@ -8026,6 +8085,15 @@ function renderDescriptionHTML(desc){
 }
 
 function renderResult(r){
+  // 🔬 DIAGNOSTIC: renderResult entry tracking
+  console.log('🔬 RENDER RESULT ENTRY', {
+    upc: r && r.upc,
+    incomingTitle: r && r.title,
+    currentSelectedTitle: cur && cur._selectedTitle,
+    currentTitle: cur && cur.title,
+    time: performance.now()
+  });
+
   if(!r)return;
   const sv=r.verdict==='SAVVY';
   const ebay=r.ebay||{};
@@ -8254,7 +8322,7 @@ function renderResult(r){
   h+=`<div class="card" style="border-left:3px solid #7c4dff;background:rgba(124,77,255,.06)">
     <div class="lbl" style="color:#a98bff">✨ Auditoría IA — Item Specifics</div>
     <div style="font-size:12px;color:var(--mu);margin:4px 0 8px">Último paso: deja que la IA revise el listado y complete las especificaciones para máxima visibilidad en eBay.</div>
-    <button id="specifics-btn" onclick="psGenerateSpecifics()" ontouchend="event.preventDefault();psGenerateSpecifics()" style="width:100%;background:linear-gradient(135deg,#7c4dff,#448aff);border:none;border-radius:10px;padding:13px;color:#fff;font-size:15px;font-weight:800;cursor:pointer">🔍 Revisar y Completar Listado</button>
+    <button id="specifics-btn" onclick="psGenerateSpecifics('MANUAL_REVIEW_BUTTON')" ontouchend="event.preventDefault();psGenerateSpecifics('MANUAL_REVIEW_BUTTON')" style="width:100%;background:linear-gradient(135deg,#7c4dff,#448aff);border:none;border-radius:10px;padding:13px;color:#fff;font-size:15px;font-weight:800;cursor:pointer">🔍 Revisar y Completar Listado</button>
     <div id="specifics-preview"></div>
   </div>`;
 
@@ -8360,7 +8428,7 @@ function renderResult(r){
     // igual que la descripción. El botón sigue ahí por si quieren re-generar
     // manualmente, pero ya NO es obligatorio para tener un listado completo.
     setTimeout(function(){
-      if (typeof psGenerateSpecifics === 'function') psGenerateSpecifics();
+      if (typeof psGenerateSpecifics === 'function') psGenerateSpecifics('AUTO_RENDER_TIMEOUT');
     }, 900);
   },80);
 }
