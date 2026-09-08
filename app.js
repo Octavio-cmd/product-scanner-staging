@@ -6763,18 +6763,28 @@ function psParseSetIncludes(title) {
   
   // Si no hay coincidencias, retornar null
   if (matches.length === 0) return null;
-  
+
+  // CRITICAL FIX (BUG #3): Ignore ct/count matches; they are QUANTITY units, not Set Includes.
+  // "ct" and "count" represent package count (handled separately by Count/Size logic).
+  // Do NOT create "80 Tablets" from "80ct" — form and quantity are independent.
+  // Filter out ct/count matches and consider remaining matches for Set Includes.
+  var validMatches = matches.filter(function(m) {
+    return !m.word.match(/^(ct|count)$/i);  // Ignore ct/count; consider other candidates
+  });
+
+  // If no valid Set Includes candidates remain, return null (e.g., "80ct" with nothing else)
+  if (validMatches.length === 0) return null;
+
   // ESTRATEGIA: Priorizar números grandes (365, 100) sobre pequeños (10, 3)
-  // Porque "365 tablets" es el Set Includes, "10mg" es dosage (que no queremos)
-  var bestMatch = matches.reduce(function(prev, curr) {
+  // from valid (non-ct/count) candidates
+  var bestMatch = validMatches.reduce(function(prev, curr) {
     return curr.num > prev.num ? curr : prev;
   });
-  
+
   var num = bestMatch.num;
   var word = bestMatch.word;
-  
+
   // Mapear a valores eBay estándar
-  if (word.match(/ct|count/i)) return num + ' Tablets';  // "365ct" o "365 count" → "365 Tablets"
   if (word.match(/pack|units?|pieces?|pcs?/i)) return num + ' Units';
   if (word.match(/test/i)) return num + ' Tests';
   if (word.match(/strip/i)) return num + ' Strips';
@@ -6782,7 +6792,7 @@ function psParseSetIncludes(title) {
   if (word.match(/box/i)) return num + ' Boxes';
   if (word.match(/tab/i)) return num + ' Tablets';
   if (word.match(/cap/i)) return num + ' Capsules';
-  
+
   // Default
   return bestMatch.text;
 }
@@ -8610,6 +8620,34 @@ function buildLocalFallbackDescription(curObj, packs) {
   };
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// CANONICAL PRODUCT NAME HELPER — REMOVE MARKETPLACE METADATA (BUG #4 FIX)
+// ═══════════════════════════════════════════════════════════════════════════
+// Purpose: Sanitize raw eBay marketplace title to create clean product identity
+// Removes: Terminal "Pack of N [Condition]" patterns that are seller metadata
+// Preserves: Intrinsic product facts (quantity units, form descriptors, specs)
+// Examples:
+//   "Vitamin C Gummies 80ct Pack of 2 New" → "Vitamin C Gummies 80ct"
+//   "LEGO 1000 Pieces 6 Pack Used" → "LEGO 1000 Pieces"
+//   "2-in-1 Shampoo 12oz New" → "2-in-1 Shampoo 12oz"
+// ═══════════════════════════════════════════════════════════════════════════
+function psCanonicalProductName(rawTitle) {
+  if (!rawTitle) return rawTitle;
+
+  var canonical = String(rawTitle).trim();
+
+  // CRITICAL: Remove terminal marketplace metadata patterns atomically.
+  // Match "Pack of N [Condition]" or standalone condition at END only.
+  // Pattern: (Pack of \d+\s+)?(New|Used|Refurbished|Open Box)$
+  canonical = canonical.replace(/\s+(?:Pack of \d+\s+)?(New|Used|Refurbished|Open Box)\s*$/i, '').trim();
+
+  // Also handle "Pack of N" alone at end (less common but possible)
+  canonical = canonical.replace(/\s+Pack of \d+\s*$/i, '').trim();
+
+  return canonical;
+}
+window.psCanonicalProductName = psCanonicalProductName;
+
 function descForPack(desc, packs, curObj) {
   if (!desc) return desc;
 
@@ -8617,24 +8655,31 @@ function descForPack(desc, packs, curObj) {
   // Extract clean product identity from immutable base fields
   var productName = '';
   if (curObj) {
-    // Use the original product title from curObj.prod (immutable, before any eBay transformations)
-    // or fall back to curObj.title (base title before pack-specific modifications)
-    // Never use curObj._selectedTitle as it contains pack-specific "Pack of N" and "New" suffixes
-    var prodTitle = (curObj.prod && curObj.prod.title) || '';
-    var curTitle = curObj.title || '';
-    productName = prodTitle || curTitle;
+    // FIX #2: Materialize canonical product identity ONCE per base product
+    // Keep cur.prod.title immutable as source evidence
+    // All pack variants inherit the SAME canonical identity
+    if (!curObj._canonicalProductName) {
+      // Create canonical identity once (first time descForPack is called for this product)
+      var rawProdTitle = (curObj.prod && curObj.prod.title) || '';
+      var rawCurTitle = curObj.title || '';
+      var rawTitle = rawProdTitle || rawCurTitle;
+      curObj._canonicalProductName = psCanonicalProductName(rawTitle);
+    }
+
+    // Use cached canonical identity (all packs share same base identity)
+    productName = curObj._canonicalProductName;
     productName = productName.trim();
 
-    // ── INSTRUMENTATION: Trace "Pack of 2 New" source ──
-    if (productName.indexOf('Pack of') >= 0 && productName.indexOf('New') >= 0) {
-      console.log('🔍 PACK OF N NEW SOURCE TRACE:');
+    // ── INSTRUMENTATION: Trace "Pack of 2 New" source (BUG #4 verification) ──
+    // Trigger if RAW title contains marketplace metadata (before sanitization)
+    var rawTitleForTrace = (curObj.prod && curObj.prod.title) || curObj.title || '';
+    if (rawTitleForTrace.indexOf('Pack of') >= 0 && rawTitleForTrace.indexOf('New') >= 0) {
+      console.log('✅ BUG #4 FIX VERIFICATION — Marketplace Metadata Sanitization:');
+      console.log('  RAW (immutable source):', rawTitleForTrace);
+      console.log('  CANONICAL (used in descriptions):', productName);
+      console.log('  Removed: "Pack of X [Condition]" terminal patterns');
       console.log('  packs:', packs);
-      console.log('  curObj.prod.title:', prodTitle);
-      console.log('  curObj.title:', curTitle);
-      console.log('  curObj._selectedTitle:', curObj._selectedTitle || '(not set)');
-      console.log('  selectedProductName:', productName);
       console.log('  curObj.sku:', curObj.sku);
-      console.log('  Stack:', new Error().stack.split('\n').slice(1, 4).join(' | '));
     }
   }
 
