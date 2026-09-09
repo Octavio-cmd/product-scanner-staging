@@ -10539,25 +10539,34 @@ function saveSheetsUrl() {
 }
 
 // ══════════════════════════════════════════════════════════════════════════
-// DIAGNOSTIC: PNG ALPHA PRESERVATION TEST
+// DIAGNOSTIC: BACKEND PNG FORMAT SUPPORT TEST (CORRECTED)
 // ══════════════════════════════════════════════════════════════════════════
-// TEMPORARY diagnostic function to verify PNG alpha channel preservation
-// through the /api/img-upload backend.
+// TEMPORARY diagnostic function to verify backend PNG format support.
+//
+// CRITICAL DIFFERENCE FROM PREVIOUS TEST:
+// - Bypasses _uploadToBucket() completely
+// - Calls backend directly via psAuthFetch()
+// - Forces ext:'png' explicitly in request body
+// - Isolated backend behavior from frontend wrapper
 //
 // Usage (in browser console):
 //   psTestPngUpload()
 //
 // Tests:
 // 1. Create PNG with transparent background (alpha=0)
-// 2. Upload via authenticated _uploadToBucket()
-// 3. Load returned image
-// 4. Verify alpha channel preserved (not converted to JPEG white)
+// 2. Verify PNG transparency locally before upload
+// 3. Call backend DIRECTLY with forced ext:'png'
+// 4. Report what extension backend returns in URL
+//
+// INTERPRETATION:
+// - Returns .png → backend supports PNG format
+// - Returns .jpg/.jpeg → backend re-encodes or ignores ext param
 //
 // This is diagnostic-only code and can be deleted after testing.
 // ══════════════════════════════════════════════════════════════════════════
 
 window.psTestPngUpload = async function() {
-  console.log('🧪 PNG Alpha Preservation Test Starting...');
+  console.log('🧪 PNG Backend Format Support Test (Corrected) Starting...');
 
   try {
     // STEP 1: Create test PNG with transparent background
@@ -10566,111 +10575,179 @@ window.psTestPngUpload = async function() {
     testCanvas.height = 100;
     const ctx = testCanvas.getContext('2d');
 
-    // DO NOT fill background — leave transparent (default)
+    // DO NOT fill background — leave transparent (default alpha=0)
     // Draw opaque rectangle in center for verification
     ctx.fillStyle = '#FF0000';
     ctx.fillRect(30, 30, 40, 40);
 
     const testPngDataUrl = testCanvas.toDataURL('image/png');
-    console.log('✓ Test PNG created');
+    console.log('✓ Test PNG created (100x100 with transparent background)');
 
-    // STEP 2: Verify PNG data before upload
-    const testImg = new Image();
-    testImg.onload = async function() {
+    // STEP 2: Extract base64 from dataUrl
+    const b64 = testPngDataUrl.split(',')[1];
+    if (!b64) {
+      throw new Error('Failed to extract base64 from PNG dataUrl');
+    }
+    console.log('✓ PNG base64 extracted (' + Math.round(b64.length / 1024) + ' KB)');
+
+    // STEP 3: Verify PNG transparency before upload
+    const verifyImg = new Image();
+    verifyImg.onload = async function() {
       const verifyCanvas = document.createElement('canvas');
       verifyCanvas.width = 100;
       verifyCanvas.height = 100;
       const verifyCtx = verifyCanvas.getContext('2d');
-      verifyCtx.drawImage(testImg, 0, 0);
+      verifyCtx.drawImage(verifyImg, 0, 0);
 
-      const beforeCornerData = verifyCtx.getImageData(0, 0, 1, 1).data;
-      const beforeCenterData = verifyCtx.getImageData(50, 50, 1, 1).data;
+      const cornerData = verifyCtx.getImageData(0, 0, 1, 1).data;
+      const centerData = verifyCtx.getImageData(50, 50, 1, 1).data;
 
-      const beforeCornerAlpha = beforeCornerData[3];
-      const beforeCenterAlpha = beforeCenterData[3];
+      const cornerAlpha = cornerData[3];
+      const centerAlpha = centerData[3];
 
-      console.log(`Before upload - Corner alpha: ${beforeCornerAlpha}, Center alpha: ${beforeCenterAlpha}`);
+      console.log(`✓ Local verification - Corner alpha: ${cornerAlpha}, Center alpha: ${centerAlpha}`);
 
-      // STEP 3: Upload through authenticated path
-      const uploadedUrl = await _uploadToBucket(testPngDataUrl, 'ps-test-png-alpha');
+      if (cornerAlpha !== 0 || centerAlpha !== 255) {
+        throw new Error('PNG transparency verification failed before upload');
+      }
 
-      if (!uploadedUrl) {
-        console.error('❌ Upload failed - backend rejected PNG');
+      // STEP 4: Call backend DIRECTLY via psAuthFetch (bypassing _uploadToBucket)
+      console.log('📤 Calling backend directly with forced ext:png...');
+
+      let response;
+      try {
+        response = await psAuthFetch('/api/img-upload', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            image: b64,
+            name: 'ps-test-png-direct',
+            ext: 'png'  // FORCED PNG extension
+          })
+        });
+      } catch(fetchErr) {
+        console.error('❌ Backend request failed:', fetchErr.message);
         window.psTestResult = {
+          requestExt: 'png',
           uploadSuccess: false,
-          error: 'Backend rejected PNG upload',
-          transparencyPreserved: false
+          error: fetchErr.message || 'Backend request failed',
+          errorCode: fetchErr.code || 'unknown'
         };
+        console.table(window.psTestResult);
         return;
       }
 
-      console.log(`✓ Upload succeeded: ${uploadedUrl}`);
-
-      // STEP 4: Load returned image and verify alpha
-      const returnedImg = new Image();
-      returnedImg.crossOrigin = 'anonymous';
-      returnedImg.onload = function() {
-        const resultCanvas = document.createElement('canvas');
-        resultCanvas.width = 100;
-        resultCanvas.height = 100;
-        const resultCtx = resultCanvas.getContext('2d');
-        resultCtx.drawImage(returnedImg, 0, 0);
-
-        const afterCornerData = resultCtx.getImageData(0, 0, 1, 1).data;
-        const afterCenterData = resultCtx.getImageData(50, 50, 1, 1).data;
-
-        const afterCornerAlpha = afterCornerData[3];
-        const afterCenterAlpha = afterCenterData[3];
-
-        console.log(`After upload - Corner alpha: ${afterCornerAlpha}, Center alpha: ${afterCenterAlpha}`);
-
-        // Determine if transparency was preserved
-        const transparencyPreserved = (afterCornerAlpha === 0) && (afterCenterAlpha === 255);
-
+      // STEP 5: Parse response
+      let responseJson;
+      try {
+        responseJson = await response.json();
+      } catch(parseErr) {
+        console.error('❌ Failed to parse backend response:', parseErr.message);
         window.psTestResult = {
-          uploadSuccess: true,
-          returnedUrl: uploadedUrl,
-          beforeCornerAlpha: beforeCornerAlpha,
-          beforeCenterAlpha: beforeCenterAlpha,
-          afterCornerAlpha: afterCornerAlpha,
-          afterCenterAlpha: afterCenterAlpha,
-          transparencyPreserved: transparencyPreserved
+          requestExt: 'png',
+          uploadSuccess: false,
+          httpStatus: response.status,
+          error: 'Invalid JSON response from backend',
+          responseText: await response.text().catch(() => '(unreadable)')
         };
-
-        if (transparencyPreserved) {
-          console.log('✅ PNG TRANSPARENCY PRESERVED');
-        } else {
-          console.error('❌ PNG TRANSPARENCY LOST (alpha destroyed in backend)');
-        }
-
         console.table(window.psTestResult);
-      };
+        return;
+      }
 
-      returnedImg.onerror = function() {
-        console.error('❌ Failed to load returned image');
+      // STEP 6: Check HTTP status
+      if (!response.ok) {
+        console.error('❌ Backend returned error:', response.status, responseJson);
         window.psTestResult = {
-          uploadSuccess: true,
-          returnedUrl: uploadedUrl,
-          error: 'Failed to load returned image',
-          transparencyPreserved: false
+          requestExt: 'png',
+          uploadSuccess: false,
+          httpStatus: response.status,
+          error: responseJson.error || responseJson.message || 'Backend error',
+          responseBody: responseJson
         };
+        console.table(window.psTestResult);
+        return;
+      }
+
+      // STEP 7: Extract returned URL
+      const returnedUrl = responseJson.url || responseJson.imageUrl || null;
+      if (!returnedUrl) {
+        console.error('❌ No URL in backend response:', responseJson);
+        window.psTestResult = {
+          requestExt: 'png',
+          uploadSuccess: false,
+          error: 'No URL returned by backend',
+          responseBody: responseJson
+        };
+        console.table(window.psTestResult);
+        return;
+      }
+
+      console.log(`✓ Upload succeeded. Returned URL: ${returnedUrl}`);
+
+      // STEP 8: Extract extension from returned URL
+      const urlExtMatch = returnedUrl.match(/\.([a-z]+)(?:\?|$)/i);
+      const returnedExt = urlExtMatch ? urlExtMatch[1].toLowerCase() : 'unknown';
+      console.log(`📊 Returned URL extension: ${returnedExt}`);
+
+      // STEP 9: Attempt Content-Type check via HEAD (may be blocked by CORS)
+      let contentType = 'unknown';
+      try {
+        const headResponse = await fetch(returnedUrl, { method: 'HEAD', mode: 'cors' });
+        const ct = headResponse.headers.get('Content-Type');
+        if (ct) {
+          contentType = ct;
+          console.log(`📊 Content-Type header: ${contentType}`);
+        }
+      } catch(headErr) {
+        console.log(`⚠️ HEAD request blocked by CORS (expected): ${headErr.message}`);
+        contentType = 'blocked_by_cors';
+      }
+
+      // STEP 10: Compile result
+      window.psTestResult = {
+        requestExt: 'png',
+        uploadSuccess: true,
+        httpStatus: response.status,
+        returnedUrl: returnedUrl,
+        returnedUrlExtension: returnedExt,
+        contentType: contentType,
+        localAlphaBeforeUpload: {
+          cornerAlpha: cornerAlpha,
+          centerAlpha: centerAlpha
+        }
       };
 
-      returnedImg.src = uploadedUrl;
+      // STEP 11: Interpret result
+      const passA = (returnedExt === 'png');
+      const failB = (returnedExt === 'jpg' || returnedExt === 'jpeg');
+
+      if (passA) {
+        console.log('✅ PASS A: Backend accepted PNG and returned .png extension');
+      } else if (failB) {
+        console.error('❌ FAIL B: Backend re-encoded PNG to JPEG (.jpg/.jpeg returned)');
+      } else {
+        console.warn(`⚠️ UNKNOWN: Unexpected extension returned: .${returnedExt}`);
+      }
+
+      console.table(window.psTestResult);
     };
 
-    testImg.onerror = function() {
-      console.error('❌ Failed to create test PNG');
+    verifyImg.onerror = function() {
+      console.error('❌ Failed to verify local PNG');
+      window.psTestResult = {
+        uploadSuccess: false,
+        error: 'Failed to verify local PNG before upload'
+      };
     };
 
-    testImg.src = testPngDataUrl;
+    verifyImg.src = testPngDataUrl;
 
   } catch(err) {
     console.error('❌ Test error:', err);
     window.psTestResult = {
       uploadSuccess: false,
       error: err.message,
-      transparencyPreserved: false
+      stack: err.stack
     };
   }
 };
