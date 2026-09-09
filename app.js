@@ -2653,7 +2653,11 @@ function psGetVisibleImageBounds(img){
 
 // Calcula el mejor acomodo (columnas/filas) para `count` copias de una foto
 // dentro de un canvas cuadrado de tamaño `sz`, dado el aspect ratio de la foto.
-function psComputeLayout(count, sz, imgAspect){
+// Para fuentes opacas: usa espaciado seguro sin solapamiento destructivo
+// Para fuentes con transparencia: puede usar solapamiento intencional
+function psComputeLayout(count, sz, imgAspect, hasTransparency){
+  // Default to transparent if not provided (safer assumption)
+  const isOpaque = hasTransparency === false;
   if (count === 1) {
     const h = sz*.95, w = h*imgAspect;
     let s = 1; if (w > sz*.95) s = (sz*.95)/w;
@@ -2764,11 +2768,33 @@ function psComputeLayout(count, sz, imgAspect){
     if (isTall) {
       const unitH = sz * 0.27;
       const unitW = unitH * imgAspect;
-      // Rear 2: width-relative spacing
-      const rearRow = makeRow(2, 425, 320, unitW, unitH, 1.0);
-      // Front 2: width-relative spacing
-      const frontRow = makeRow(2, 395, 470, unitW, unitH, 1.0);
-      positions.push(...rearRow, ...frontRow);
+
+      if (isOpaque) {
+        // OPAQUE SOURCE: Safe spacing, NO destructive vertical overlap
+        // Calculate safe spacing: rear and front rows touch at edges but don't overlap
+        // unitH = 324px for 4-pack
+        // Rear row: centerY such that bottom = sz/2 - gap/2
+        // Front row: centerY such that top = sz/2 + gap/2
+        // With 0 gap: rear bottom = 600, front top = 600
+        const gapPixels = 20;
+        const safeRearY = (sz / 2) - (unitH / 2) - (gapPixels / 2);  // = 600 - 162 - 10 = 428
+        const safeFrontY = (sz / 2) + (unitH / 2) + (gapPixels / 2); // = 600 + 162 + 10 = 772
+        // However, we also need to ensure frontRow fits in canvas
+        // frontRow top = safeFrontY - unitH/2 = 772 - 162 = 610, bottom = 772 + 162 = 934 ✓ fits
+
+        const rearRow = makeRow(2, 425, safeRearY, unitW, unitH, 1.0);
+        const frontRow = makeRow(2, 395, safeFrontY, unitW, unitH, 1.0);
+        positions.push(...rearRow, ...frontRow);
+        console.log('📐 4-pack TALL opaque: rear@' + safeRearY.toFixed(0) + ' front@' + safeFrontY.toFixed(0) + ' (safe spacing)');
+      } else {
+        // TRANSPARENT SOURCE: Can use intentional overlap for visual depth
+        // Rear 2: width-relative spacing
+        const rearRow = makeRow(2, 425, 320, unitW, unitH, 1.0);
+        // Front 2: width-relative spacing
+        const frontRow = makeRow(2, 395, 470, unitW, unitH, 1.0);
+        positions.push(...rearRow, ...frontRow);
+        console.log('📐 4-pack TALL using TRANSPARENT layout (intentional overlap safe)');
+      }
     } else if (isWide) {
       const unitH = sz * 0.16;
       const unitW = unitH * imgAspect;
@@ -3180,7 +3206,8 @@ function psGeneratePackImage(img, count){
 
     perfMarks.layoutStart = performance.now();
     console.log('🎨 Computing layout with aspect ' + visibleBounds.aspect.toFixed(3));
-    const positions = psComputeLayout(count, sz, visibleBounds.aspect);
+    console.log('📊 Source transparency: ' + (visibleBounds.hasTransparency ? 'YES (safe overlap)' : 'NO (opaque, safe spacing)'));
+    const positions = psComputeLayout(count, sz, visibleBounds.aspect, visibleBounds.hasTransparency);
     perfMarks.layoutEnd = performance.now();
     console.log('[PERF][PACK ' + count + '] layout: ' + Math.round(perfMarks.layoutEnd - perfMarks.layoutStart) + ' ms');
 
