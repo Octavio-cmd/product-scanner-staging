@@ -2169,11 +2169,12 @@ async function clRemoveBackground(file, onStatus){
   const rbgRes = await fetch(RAILWAY_RBG, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    // format 'jpeg' → el servidor pone el fondo blanco y devuelve JPEG.
-    // Antes bajaba un PNG con transparencia de 4-8 MB que este mismo codigo
-    // aplastaba contra fondo blanco tres lineas despues. Mismo resultado
-    // final, una decima parte del peso.
-    body: JSON.stringify({ image: b64, format: 'jpeg', quality: 92 })
+    // ── CRITICAL: Request PNG format to preserve alpha channel ──
+    // Previous: format: 'jpeg' caused server to paint white and return opaque JPEG
+    // Result: Opaque JPEG source → painter's algorithm occlusion → rear bottles hidden
+    // Fix: Request PNG format with transparency preserved
+    // PNG allows pack composition without occlusion via transparent regions
+    body: JSON.stringify({ image: b64, format: 'png' })
   });
   perfMarks.rbgReqEnd = performance.now();
   console.log('[PERF][PHOTO] remove-bg-request: ' + Math.round(perfMarks.rbgReqEnd - perfMarks.rbgReqStart) + ' ms');
@@ -2189,45 +2190,15 @@ async function clRemoveBackground(file, onStatus){
   const isJpeg = (rbgData.mime === 'image/jpeg') || (rbgData.format === 'jpeg');
   const pngUrl = 'data:' + (isJpeg ? 'image/jpeg' : 'image/png') + ';base64,' + rbgData.image;
 
-  // ── Fondo blanco ──
-  // Si el servidor ya lo devolvio en JPEG, el fondo blanco ya viene puesto:
-  // volver a pasarlo por canvas solo agregaria otra recompresion JPEG.
-  // Si vino PNG (servidor viejo o fallback), se procesa como siempre.
-  let cleanUrl;
-  if (isJpeg) {
-    if(onStatus) onStatus('🖼️ Listo...');
-    perfMarks.bgProcessStart = performance.now();
-    perfMarks.bgProcessEnd = performance.now();
-    console.log('[PERF][PHOTO] bg-process: ' + Math.round(perfMarks.bgProcessEnd - perfMarks.bgProcessStart) + ' ms (jpeg, no reprocessing)');
-    cleanUrl = pngUrl;
-  } else {
-    if(onStatus) onStatus('🖼️ Procesando fondo...');
-    perfMarks.bgProcessStart = performance.now();
-    cleanUrl = await new Promise(function(resolve) {
-      var img = new Image();
-      img.onload = function() {
-        var canvas = document.createElement('canvas');
-        canvas.width = img.width;
-        canvas.height = img.height;
-        var ctx = canvas.getContext('2d');
-        // Alta calidad de suavizado
-        ctx.imageSmoothingEnabled = true;
-        ctx.imageSmoothingQuality = 'high';
-        // Dibujar imagen primero
-        ctx.drawImage(img, 0, 0);
-        // Fondo blanco DETRÁS con destination-over
-        ctx.globalCompositeOperation = 'destination-over';
-        ctx.fillStyle = '#ffffff';
-        ctx.fillRect(0, 0, canvas.width, canvas.height);
-        // Calidad JPEG alta (0.95) — buen balance calidad/tamaño para ImgBB
-        resolve(canvas.toDataURL('image/jpeg', 0.95));
-      };
-      img.onerror = function() { resolve(pngUrl); };
-      img.src = pngUrl;
-    });
-    perfMarks.bgProcessEnd = performance.now();
-    console.log('[PERF][PHOTO] bg-process: ' + Math.round(perfMarks.bgProcessEnd - perfMarks.bgProcessStart) + ' ms (png reprocessing)');
-  }
+  // ── PNG format with alpha channel preserved ──
+  // Requesting PNG format from background-removal API preserves transparency (alpha channel).
+  // Do NOT convert PNG to JPEG here—that destroys the alpha channel needed for proper
+  // multipack composition where transparent areas allow overlapping product images to show through.
+  if(onStatus) onStatus('🖼️ Listo...');
+  perfMarks.bgProcessStart = performance.now();
+  perfMarks.bgProcessEnd = performance.now();
+  console.log('[PERF][PHOTO] bg-process: ' + Math.round(perfMarks.bgProcessEnd - perfMarks.bgProcessStart) + ' ms (png, alpha preserved)');
+  const cleanUrl = pngUrl;
 
   if(onStatus) onStatus('📤 Subiendo...');
   perfMarks.uploadStart = performance.now();
