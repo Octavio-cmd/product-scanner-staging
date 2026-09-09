@@ -10538,3 +10538,140 @@ function saveSheetsUrl() {
   setTimeout(closeCfg, 700);
 }
 
+// ══════════════════════════════════════════════════════════════════════════
+// DIAGNOSTIC: PNG ALPHA PRESERVATION TEST
+// ══════════════════════════════════════════════════════════════════════════
+// TEMPORARY diagnostic function to verify PNG alpha channel preservation
+// through the /api/img-upload backend.
+//
+// Usage (in browser console):
+//   psTestPngUpload()
+//
+// Tests:
+// 1. Create PNG with transparent background (alpha=0)
+// 2. Upload via authenticated _uploadToBucket()
+// 3. Load returned image
+// 4. Verify alpha channel preserved (not converted to JPEG white)
+//
+// This is diagnostic-only code and can be deleted after testing.
+// ══════════════════════════════════════════════════════════════════════════
+
+window.psTestPngUpload = async function() {
+  console.log('🧪 PNG Alpha Preservation Test Starting...');
+
+  try {
+    // STEP 1: Create test PNG with transparent background
+    const testCanvas = document.createElement('canvas');
+    testCanvas.width = 100;
+    testCanvas.height = 100;
+    const ctx = testCanvas.getContext('2d');
+
+    // DO NOT fill background — leave transparent (default)
+    // Draw opaque rectangle in center for verification
+    ctx.fillStyle = '#FF0000';
+    ctx.fillRect(30, 30, 40, 40);
+
+    const testPngDataUrl = testCanvas.toDataURL('image/png');
+    console.log('✓ Test PNG created');
+
+    // STEP 2: Verify PNG data before upload
+    const testImg = new Image();
+    testImg.onload = async function() {
+      const verifyCanvas = document.createElement('canvas');
+      verifyCanvas.width = 100;
+      verifyCanvas.height = 100;
+      const verifyCtx = verifyCanvas.getContext('2d');
+      verifyCtx.drawImage(testImg, 0, 0);
+
+      const beforeCornerData = verifyCtx.getImageData(0, 0, 1, 1).data;
+      const beforeCenterData = verifyCtx.getImageData(50, 50, 1, 1).data;
+
+      const beforeCornerAlpha = beforeCornerData[3];
+      const beforeCenterAlpha = beforeCenterData[3];
+
+      console.log(`Before upload - Corner alpha: ${beforeCornerAlpha}, Center alpha: ${beforeCenterAlpha}`);
+
+      // STEP 3: Upload through authenticated path
+      const uploadedUrl = await _uploadToBucket(testPngDataUrl, 'ps-test-png-alpha');
+
+      if (!uploadedUrl) {
+        console.error('❌ Upload failed - backend rejected PNG');
+        window.psTestResult = {
+          uploadSuccess: false,
+          error: 'Backend rejected PNG upload',
+          transparencyPreserved: false
+        };
+        return;
+      }
+
+      console.log(`✓ Upload succeeded: ${uploadedUrl}`);
+
+      // STEP 4: Load returned image and verify alpha
+      const returnedImg = new Image();
+      returnedImg.crossOrigin = 'anonymous';
+      returnedImg.onload = function() {
+        const resultCanvas = document.createElement('canvas');
+        resultCanvas.width = 100;
+        resultCanvas.height = 100;
+        const resultCtx = resultCanvas.getContext('2d');
+        resultCtx.drawImage(returnedImg, 0, 0);
+
+        const afterCornerData = resultCtx.getImageData(0, 0, 1, 1).data;
+        const afterCenterData = resultCtx.getImageData(50, 50, 1, 1).data;
+
+        const afterCornerAlpha = afterCornerData[3];
+        const afterCenterAlpha = afterCenterData[3];
+
+        console.log(`After upload - Corner alpha: ${afterCornerAlpha}, Center alpha: ${afterCenterAlpha}`);
+
+        // Determine if transparency was preserved
+        const transparencyPreserved = (afterCornerAlpha === 0) && (afterCenterAlpha === 255);
+
+        window.psTestResult = {
+          uploadSuccess: true,
+          returnedUrl: uploadedUrl,
+          beforeCornerAlpha: beforeCornerAlpha,
+          beforeCenterAlpha: beforeCenterAlpha,
+          afterCornerAlpha: afterCornerAlpha,
+          afterCenterAlpha: afterCenterAlpha,
+          transparencyPreserved: transparencyPreserved
+        };
+
+        if (transparencyPreserved) {
+          console.log('✅ PNG TRANSPARENCY PRESERVED');
+        } else {
+          console.error('❌ PNG TRANSPARENCY LOST (alpha destroyed in backend)');
+        }
+
+        console.table(window.psTestResult);
+      };
+
+      returnedImg.onerror = function() {
+        console.error('❌ Failed to load returned image');
+        window.psTestResult = {
+          uploadSuccess: true,
+          returnedUrl: uploadedUrl,
+          error: 'Failed to load returned image',
+          transparencyPreserved: false
+        };
+      };
+
+      returnedImg.src = uploadedUrl;
+    };
+
+    testImg.onerror = function() {
+      console.error('❌ Failed to create test PNG');
+    };
+
+    testImg.src = testPngDataUrl;
+
+  } catch(err) {
+    console.error('❌ Test error:', err);
+    window.psTestResult = {
+      uploadSuccess: false,
+      error: err.message,
+      transparencyPreserved: false
+    };
+  }
+};
+
