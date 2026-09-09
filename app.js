@@ -1907,7 +1907,12 @@ async function _compressForImgBB(dataUrl, maxSizeKB) {
   var sizeKB = Math.ceil(dataUrl.length * 3 / 4 / 1024);
   if (sizeKB <= (maxSizeKB || 800)) return dataUrl; // ya está OK
 
-  // Comprimir bajando calidad progresivamente
+  // ── MIME-AWARE COMPRESSION ──
+  // Detect input format: PNG with alpha must NOT be converted to JPEG
+  // JPEG: convert to JPEG with quality reduction
+  // PNG: preserve as PNG (alpha channel critical for transparent backgrounds in multipack)
+  var isPng = dataUrl.includes('image/png');
+
   return new Promise(function(resolve){
     var img = new Image();
     img.onload = function(){
@@ -1926,8 +1931,20 @@ async function _compressForImgBB(dataUrl, maxSizeKB) {
       }
       canvas.width = w;
       canvas.height = h;
-      canvas.getContext('2d').drawImage(img, 0, 0, w, h);
-      // Bajar calidad hasta llegar al tamaño objetivo
+      var ctx = canvas.getContext('2d');
+      ctx.drawImage(img, 0, 0, w, h);
+
+      // PNG WITH ALPHA: preserve format and compress via PNG
+      if (isPng) {
+        // For PNG, use medium quality compression while preserving alpha channel
+        // PNG compression is lossless, so we can't reduce quality like JPEG
+        // Instead, return the PNG as-is (already compressed by rembg at source)
+        var out = canvas.toDataURL('image/png');
+        resolve(out);
+        return;
+      }
+
+      // JPEG: Compress by lowering quality progressively
       var q = 0.85;
       var out = canvas.toDataURL('image/jpeg', q);
       while (Math.ceil(out.length * 3 / 4 / 1024) > (maxSizeKB || 800) && q > 0.3) {
@@ -1964,6 +1981,13 @@ async function _uploadToBucket(dataUrl, slotName) {
     var b64 = dataUrl ? dataUrl.split(',')[1] : null;
     if (!b64) return null;
 
+    // ── MIME-AWARE FILE EXTENSION ──
+    // Detect actual format after compression and use matching extension
+    var ext = 'jpg'; // default for JPEG
+    if (dataUrl.includes('image/png')) {
+      ext = 'png'; // PNG with alpha channel must use png extension
+    }
+
     // Timeout handling (AbortSignal.timeout not in Safari iOS)
     var controller = null, timeoutId = null;
     try {
@@ -1977,7 +2001,7 @@ async function _uploadToBucket(dataUrl, slotName) {
       body: JSON.stringify({
         image: b64,
         name: slotName || 'photo',
-        ext: 'jpg'
+        ext: ext
       }),
       signal: controller ? controller.signal : undefined
     };
@@ -2231,6 +2255,18 @@ async function psCapturePhoto(slotId){
   // Sin input.capture → iOS muestra su menú nativo: Fototeca / Tomar foto / Archivo
   // (las tres opciones que necesitamos)
 
+  // ── CRITICAL FIX FOR iOS SAFARI ──
+  // Input MUST be in DOM before click() for Safari file picker to open.
+  // Use offscreen positioning (more reliable than display:none).
+  // Remove after change/cancel to avoid detached inputs lingering in memory.
+  input.style.position = 'fixed';
+  input.style.left = '-10000px';
+  input.style.top = '-10000px';
+  input.style.width = '1px';
+  input.style.height = '1px';
+  input.style.opacity = '0';
+  document.body.appendChild(input);
+
   input.onchange = async function(e){
     var file = e.target.files[0];
     if(!file) return;
@@ -2283,9 +2319,17 @@ async function psCapturePhoto(slotId){
         if(slot) slot.innerHTML = '<div style="text-align:center;padding:8px"><div style="font-size:24px">📷</div><div style="font-size:10px;color:#ff5252">Error — toca para reintentar</div></div>';
       }
     }
+    // Cleanup after successful selection
+    if(input.parentNode) input.parentNode.removeChild(input);
+  };
+
+  // Handle cancel (user closes picker without selecting)
+  input.oncancel = function(){
+    if(input.parentNode) input.parentNode.removeChild(input);
   };
 
   // PRIMERO el click — luego nada más. Safari requiere que el click sea inmediato.
+  // Input is now in DOM and will trigger file picker on click.
   input.click();
 }
 
@@ -2305,6 +2349,18 @@ function psAddExtraPhoto(){
   var input = document.createElement('input');
   input.type = 'file';
   input.accept = 'image/*';
+
+  // ── CRITICAL FIX FOR iOS SAFARI ──
+  // Input MUST be in DOM before click() for Safari file picker to open.
+  // Use offscreen positioning (more reliable than display:none).
+  input.style.position = 'fixed';
+  input.style.left = '-10000px';
+  input.style.top = '-10000px';
+  input.style.width = '1px';
+  input.style.height = '1px';
+  input.style.opacity = '0';
+  document.body.appendChild(input);
+
   input.onchange = async function(e){
     var file = e.target.files[0];
     if(!file) return;
@@ -2339,7 +2395,16 @@ function psAddExtraPhoto(){
         renderExtraPhotosUI();
       }
     }
+    // Cleanup after successful selection
+    if(input.parentNode) input.parentNode.removeChild(input);
   };
+
+  // Handle cancel (user closes picker without selecting)
+  input.oncancel = function(){
+    if(input.parentNode) input.parentNode.removeChild(input);
+  };
+
+  // Input is now in DOM and will trigger file picker on click.
   input.click();
 }
 
@@ -2365,7 +2430,7 @@ function renderExtraPhotosUI(){
     }
   });
   if(extras.length < MAX_EXTRA_PHOTOS){
-    h += '<div onclick="psAddExtraPhoto()" ontouchend="event.preventDefault();psAddExtraPhoto()" style="width:72px;height:72px;background:var(--sf2);border:2px dashed var(--bd);border-radius:10px;display:flex;align-items:center;justify-content:center;cursor:pointer;font-size:28px;color:var(--mu)">+</div>';
+    h += '<div onclick="psAddExtraPhoto()" style="width:72px;height:72px;background:var(--sf2);border:2px dashed var(--bd);border-radius:10px;display:flex;align-items:center;justify-content:center;cursor:pointer;font-size:28px;color:var(--mu)">+</div>';
   }
   h += '</div>';
   h += '<div style="font-size:10px;color:var(--mu);margin-top:4px">'+extras.length+'/'+MAX_EXTRA_PHOTOS+' fotos extra (opcional) — mismo proceso que BACK</div>';
@@ -8251,16 +8316,14 @@ function renderResult(r){
     <div style="display:flex;gap:10px">
       <div style="flex:1">
         <div style="font-size:11px;color:var(--mu);text-align:center;margin-bottom:4px">FRONT${r._frontImg?' ✅':''}</div>
-        <div id="ps-slot-front" 
-          onclick="psCapturePhoto('front')" 
-          ontouchend="event.preventDefault();psCapturePhoto('front')" 
+        <div id="ps-slot-front"
+          onclick="psCapturePhoto('front')"
           style="aspect-ratio:1;background:var(--sf2);border:2px dashed var(--bd);border-radius:10px;display:flex;align-items:center;justify-content:center;cursor:pointer;overflow:hidden">${frontThumb}</div>
       </div>
       <div style="flex:1">
         <div style="font-size:11px;color:var(--mu);text-align:center;margin-bottom:4px">BACK${r._backImg?' ✅':''}</div>
-        <div id="ps-slot-back" 
-          onclick="psCapturePhoto('back')" 
-          ontouchend="event.preventDefault();psCapturePhoto('back')" 
+        <div id="ps-slot-back"
+          onclick="psCapturePhoto('back')"
           style="aspect-ratio:1;background:var(--sf2);border:2px dashed var(--bd);border-radius:10px;display:flex;align-items:center;justify-content:center;cursor:pointer;overflow:hidden">${backThumb}</div>
       </div>
     </div>
@@ -10538,217 +10601,4 @@ function saveSheetsUrl() {
   setTimeout(closeCfg, 700);
 }
 
-// ══════════════════════════════════════════════════════════════════════════
-// DIAGNOSTIC: BACKEND PNG FORMAT SUPPORT TEST (CORRECTED)
-// ══════════════════════════════════════════════════════════════════════════
-// TEMPORARY diagnostic function to verify backend PNG format support.
-//
-// CRITICAL DIFFERENCE FROM PREVIOUS TEST:
-// - Bypasses _uploadToBucket() completely
-// - Calls backend directly via psAuthFetch()
-// - Forces ext:'png' explicitly in request body
-// - Isolated backend behavior from frontend wrapper
-//
-// Usage (in browser console):
-//   psTestPngUpload()
-//
-// Tests:
-// 1. Create PNG with transparent background (alpha=0)
-// 2. Verify PNG transparency locally before upload
-// 3. Call backend DIRECTLY with forced ext:'png'
-// 4. Report what extension backend returns in URL
-//
-// INTERPRETATION:
-// - Returns .png → backend supports PNG format
-// - Returns .jpg/.jpeg → backend re-encodes or ignores ext param
-//
-// This is diagnostic-only code and can be deleted after testing.
-// ══════════════════════════════════════════════════════════════════════════
-
-window.psTestPngUpload = async function() {
-  console.log('🧪 PNG Backend Format Support Test (Corrected) Starting...');
-
-  try {
-    // STEP 1: Create test PNG with transparent background
-    const testCanvas = document.createElement('canvas');
-    testCanvas.width = 100;
-    testCanvas.height = 100;
-    const ctx = testCanvas.getContext('2d');
-
-    // DO NOT fill background — leave transparent (default alpha=0)
-    // Draw opaque rectangle in center for verification
-    ctx.fillStyle = '#FF0000';
-    ctx.fillRect(30, 30, 40, 40);
-
-    const testPngDataUrl = testCanvas.toDataURL('image/png');
-    console.log('✓ Test PNG created (100x100 with transparent background)');
-
-    // STEP 2: Extract base64 from dataUrl
-    const b64 = testPngDataUrl.split(',')[1];
-    if (!b64) {
-      throw new Error('Failed to extract base64 from PNG dataUrl');
-    }
-    console.log('✓ PNG base64 extracted (' + Math.round(b64.length / 1024) + ' KB)');
-
-    // STEP 3: Verify PNG transparency before upload
-    const verifyImg = new Image();
-    verifyImg.onload = async function() {
-      const verifyCanvas = document.createElement('canvas');
-      verifyCanvas.width = 100;
-      verifyCanvas.height = 100;
-      const verifyCtx = verifyCanvas.getContext('2d');
-      verifyCtx.drawImage(verifyImg, 0, 0);
-
-      const cornerData = verifyCtx.getImageData(0, 0, 1, 1).data;
-      const centerData = verifyCtx.getImageData(50, 50, 1, 1).data;
-
-      const cornerAlpha = cornerData[3];
-      const centerAlpha = centerData[3];
-
-      console.log(`✓ Local verification - Corner alpha: ${cornerAlpha}, Center alpha: ${centerAlpha}`);
-
-      if (cornerAlpha !== 0 || centerAlpha !== 255) {
-        throw new Error('PNG transparency verification failed before upload');
-      }
-
-      // STEP 4: Call backend DIRECTLY via psAuthFetch (bypassing _uploadToBucket)
-      console.log('📤 Calling backend directly with forced ext:png...');
-
-      let response;
-      try {
-        response = await psAuthFetch('/api/img-upload', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            image: b64,
-            name: 'ps-test-png-direct',
-            ext: 'png'  // FORCED PNG extension
-          })
-        });
-      } catch(fetchErr) {
-        console.error('❌ Backend request failed:', fetchErr.message);
-        window.psTestResult = {
-          requestExt: 'png',
-          uploadSuccess: false,
-          error: fetchErr.message || 'Backend request failed',
-          errorCode: fetchErr.code || 'unknown'
-        };
-        console.table(window.psTestResult);
-        return;
-      }
-
-      // STEP 5: Parse response
-      let responseJson;
-      try {
-        responseJson = await response.json();
-      } catch(parseErr) {
-        console.error('❌ Failed to parse backend response:', parseErr.message);
-        window.psTestResult = {
-          requestExt: 'png',
-          uploadSuccess: false,
-          httpStatus: response.status,
-          error: 'Invalid JSON response from backend',
-          responseText: await response.text().catch(() => '(unreadable)')
-        };
-        console.table(window.psTestResult);
-        return;
-      }
-
-      // STEP 6: Check HTTP status
-      if (!response.ok) {
-        console.error('❌ Backend returned error:', response.status, responseJson);
-        window.psTestResult = {
-          requestExt: 'png',
-          uploadSuccess: false,
-          httpStatus: response.status,
-          error: responseJson.error || responseJson.message || 'Backend error',
-          responseBody: responseJson
-        };
-        console.table(window.psTestResult);
-        return;
-      }
-
-      // STEP 7: Extract returned URL
-      const returnedUrl = responseJson.url || responseJson.imageUrl || null;
-      if (!returnedUrl) {
-        console.error('❌ No URL in backend response:', responseJson);
-        window.psTestResult = {
-          requestExt: 'png',
-          uploadSuccess: false,
-          error: 'No URL returned by backend',
-          responseBody: responseJson
-        };
-        console.table(window.psTestResult);
-        return;
-      }
-
-      console.log(`✓ Upload succeeded. Returned URL: ${returnedUrl}`);
-
-      // STEP 8: Extract extension from returned URL
-      const urlExtMatch = returnedUrl.match(/\.([a-z]+)(?:\?|$)/i);
-      const returnedExt = urlExtMatch ? urlExtMatch[1].toLowerCase() : 'unknown';
-      console.log(`📊 Returned URL extension: ${returnedExt}`);
-
-      // STEP 9: Attempt Content-Type check via HEAD (may be blocked by CORS)
-      let contentType = 'unknown';
-      try {
-        const headResponse = await fetch(returnedUrl, { method: 'HEAD', mode: 'cors' });
-        const ct = headResponse.headers.get('Content-Type');
-        if (ct) {
-          contentType = ct;
-          console.log(`📊 Content-Type header: ${contentType}`);
-        }
-      } catch(headErr) {
-        console.log(`⚠️ HEAD request blocked by CORS (expected): ${headErr.message}`);
-        contentType = 'blocked_by_cors';
-      }
-
-      // STEP 10: Compile result
-      window.psTestResult = {
-        requestExt: 'png',
-        uploadSuccess: true,
-        httpStatus: response.status,
-        returnedUrl: returnedUrl,
-        returnedUrlExtension: returnedExt,
-        contentType: contentType,
-        localAlphaBeforeUpload: {
-          cornerAlpha: cornerAlpha,
-          centerAlpha: centerAlpha
-        }
-      };
-
-      // STEP 11: Interpret result
-      const passA = (returnedExt === 'png');
-      const failB = (returnedExt === 'jpg' || returnedExt === 'jpeg');
-
-      if (passA) {
-        console.log('✅ PASS A: Backend accepted PNG and returned .png extension');
-      } else if (failB) {
-        console.error('❌ FAIL B: Backend re-encoded PNG to JPEG (.jpg/.jpeg returned)');
-      } else {
-        console.warn(`⚠️ UNKNOWN: Unexpected extension returned: .${returnedExt}`);
-      }
-
-      console.table(window.psTestResult);
-    };
-
-    verifyImg.onerror = function() {
-      console.error('❌ Failed to verify local PNG');
-      window.psTestResult = {
-        uploadSuccess: false,
-        error: 'Failed to verify local PNG before upload'
-      };
-    };
-
-    verifyImg.src = testPngDataUrl;
-
-  } catch(err) {
-    console.error('❌ Test error:', err);
-    window.psTestResult = {
-      uploadSuccess: false,
-      error: err.message,
-      stack: err.stack
-    };
-  }
-};
 
