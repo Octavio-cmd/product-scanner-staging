@@ -4281,7 +4281,16 @@ function buildTitleFromSpans(spans, n, shade, expDate, curObj) {
       // la marca antes que el relleno. Se corrige a (a - b): el de MENOR
       // importancia semántica sale primero, que es lo que el comentario
       // siempre dijo. Ver PS_TITLE_TIEBREAK_NOTE.
-      return (a.semanticScore || 0) - (b.semanticScore || 0);
+      if ((a.semanticScore || 0) !== (b.semanticScore || 0)) {
+        return (a.semanticScore || 0) - (b.semanticScore || 0);
+      }
+      // Empate EXACTO (misma prioridad y misma importancia): se sacrifica el
+      // de más a la derecha. En un título el orden ya codifica jerarquía —
+      // marca e identidad al principio, variantes y sabores al final — y el
+      // sort es estable, así que sin esto caía siempre el de más a la
+      // izquierda. Con el UPC 732216300918 los tres CORE_PRODUCT empatan en
+      // 850 y se perdía "Cold Remedy" conservando "Orange Cream".
+      return (b.originalIdx || 0) - (a.originalIdx || 0);
     });
 
     // Remove the lowest-priority span (or lowest semantic importance if priority is tied)
@@ -4306,9 +4315,14 @@ function buildTitleFromSpans(spans, n, shade, expDate, curObj) {
 // como spans con prioridad propia, NO como corte posicional:
 //   prioridad 5    → BRAND (nunca se sacrifica)
 //   prioridad 4.5  → "N Total"  (dato comercial obligatorio)
-//   prioridad 4.25 → "N Each"
 //   prioridad 4    → CORE_PRODUCT y descriptores numéricos
+//   prioridad 3.9  → "N Each"   (útil pero opcional)
 //   prioridad 2    → relleno
+//
+// rev 3: "N Each" bajó de 4.25 a 3.9. Por encima de CORE_PRODUCT se comía la
+// identidad del producto: con el UPC 732216300918 salía "Zicam Ultra Orange
+// Cream 25 Each 75 Total ..." — perdía "Cold Remedy" y "Zinc Rapidmelts" para
+// conservar un "25 Each" que es redundante junto a "75 Total" y "Pack of 3".
 // El sufijo (shade + expiración + "Pack of N" + "New") lo arma
 // buildTitleFromSpans y es INVIOLABLE: nunca se recorta.
 //

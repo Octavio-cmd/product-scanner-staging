@@ -396,6 +396,96 @@ check('G-J Size "300 Total" + Count "100" -> 100',
         fx.psGetPackTotalCount(gCur({ Count: '100' }), pair[0]), pair[1]);
 });
 
+
+// ============================================================================
+// TEST Z — ZICAM: controlled fallback to current specifics
+// ============================================================================
+// UPC 732216300918. C:Size is emitted from cur._specifics (app.js:9827), never
+// from _canonicalSpecifics, so a populated C:Size column proves nothing about
+// the canonical store. For this product the canonical store was empty and the
+// title carries zero digits, so nothing could resolve the count.
+
+section('TEST Z — Zicam / controlled _specifics fallback');
+
+const ZICAM_BASE = 'Zicam Ultra Cold Remedy Zinc Rapidmelts Orange Cream';
+function zicamCur(canon, spec, extra) {
+  return Object.assign({
+    upc: '732216300918', title: ZICAM_BASE, prod: { title: ZICAM_BASE },
+    brand: 'Zicam',
+    _canonicalProductName: ZICAM_BASE,
+    _canonicalSpecifics: canon || {},
+    _specifics: spec || {}
+  }, extra || {});
+}
+
+// Authority order.
+check('Z1 _countConfirmed outranks everything',
+      fx.psGetCanonicalUnitCount(zicamCur({ Count: '99' }, { Count: '77' }, { _countConfirmed: 25 })), 25);
+check('Z2 canonical outranks current',
+      fx.psGetCanonicalUnitCount(zicamCur({ Count: '26 Count' }, { Count: '52 Count' })), 26);
+check('Z3 current used when canonical empty',
+      fx.psGetCanonicalUnitCount(zicamCur({}, { Count: '25 Count' })), 25);
+check('Z4 current Size field',
+      fx.psGetCanonicalUnitCount(zicamCur({}, { Size: '25 Count' })), 25);
+check('Z5 current Unit Quantity field',
+      fx.psGetCanonicalUnitCount(zicamCur({}, { 'Unit Quantity': '25' })), 25);
+check('Z6 canonical of OTHER fields does not block current count',
+      fx.psGetCanonicalUnitCount(zicamCur({ 'Item Form': 'Tablet' }, { Count: '25 Count' })), 25);
+
+// Safety rules apply identically to the current store.
+check('Z7 reject current "300 Total"',   fx.psGetCanonicalUnitCount(zicamCur({}, { Size: '300 Total' })), null);
+check('Z8 reject current "75 Totals"',   fx.psGetCanonicalUnitCount(zicamCur({}, { Count: '75 Totals' })), null);
+check('Z9 reject current "4.76 oz"',     fx.psGetCanonicalUnitCount(zicamCur({}, { Size: '4.76 oz' })), null);
+check('Z10 reject empty everywhere',     fx.psGetCanonicalUnitCount(zicamCur({}, {})), null);
+check('Z11 reject non-numeric',          fx.psGetCanonicalUnitCount(zicamCur({}, { Size: 'Multiple Pieces' })), null);
+check('Z12 reject 0',                    fx.psGetCanonicalUnitCount(zicamCur({}, { Size: '0 Count' })), null);
+check('Z13 measurement falls through to next current field',
+      fx.psGetCanonicalUnitCount(zicamCur({}, { Size: '4.76 oz', Count: '25 Count' })), 25);
+check('Z14 contaminated current field falls through',
+      fx.psGetCanonicalUnitCount(zicamCur({}, { Size: '300 Total', Count: '25 Count' })), 25);
+
+// Derived totals across the pack matrix.
+[[2,50],[3,75],[6,150],[10,250],[12,300]].forEach(function(pair){
+  check('Z15 zicam pack ' + pair[0] + ' -> ' + pair[1],
+        fx.psGetPackTotalCount(zicamCur({}, { Count: '25 Count' }), pair[0]), pair[1]);
+});
+
+// 1pk must not gain a derived total.
+{
+  const segs1 = fx.psBuildCountSegments(zicamCur({}, { Count: '25 Count' }), 1, ZICAM_BASE);
+  checkTrue('Z16 1pk emits no "Total" segment',
+    !segs1.some(function(s){ return /Total/.test(s.text); }), JSON.stringify(segs1.map(function(s){return s.text;})));
+}
+
+// Priority ladder (decision 2): Each below CORE_PRODUCT, Total above.
+{
+  const segs = fx.psBuildCountSegments(zicamCur({}, { Count: '25 Count' }), 3, ZICAM_BASE);
+  const each = segs.filter(function(s){ return /Each/.test(s.text); })[0];
+  const total = segs.filter(function(s){ return /Total/.test(s.text); })[0];
+  check('Z17 "N Each" priority is 3.9 (below CORE_PRODUCT 4)', each.dropPriority, 3.9);
+  check('Z18 "N Total" priority is 4.5 (above CORE_PRODUCT 4)', total.dropPriority, 4.5);
+  checkTrue('Z19 Each ranks below Total', each.dropPriority < total.dropPriority,
+    each.dropPriority + ' vs ' + total.dropPriority);
+}
+
+// Zellies must be untouched: canonical answers, fallback never reached.
+{
+  const zell = {
+    title: 'Zellies Dental Gum Spearmint 100 Pieces 4.76oz Sugar Free Xylitol Gum',
+    prod: { title: 'Zellies Dental Gum Spearmint 100 Pieces 4.76oz Sugar Free Xylitol Gum' },
+    brand: 'Zellies',
+    _canonicalSpecifics: { Count: '100' },
+    _specifics: { Count: '100' }
+  };
+  check('Z20 Zellies unit count unchanged', fx.psGetCanonicalUnitCount(zell), 100);
+  check('Z21 Zellies pack-3 total unchanged', fx.psGetPackTotalCount(zell, 3), 300);
+}
+
+// The shared scanner is exported and behaves standalone.
+check('Z22 psScanSpecificsForCount reads Count', fx.psScanSpecificsForCount({ Count: '25 Count' }), 25);
+check('Z23 psScanSpecificsForCount refuses Total', fx.psScanSpecificsForCount({ Size: '75 Total' }), null);
+check('Z24 psScanSpecificsForCount on null', fx.psScanSpecificsForCount(null), null);
+
 console.log('\n' + '═'.repeat(78));
 console.log('TEST SUMMARY');
 console.log('═'.repeat(78));

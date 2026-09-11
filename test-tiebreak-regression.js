@@ -276,6 +276,53 @@ function zelliesCur() {
   checkTrue('T6 exp: <= 80 chars', te.length <= 80, `${te.length}`);
 }
 
+// ───────────────────────────────────────────────────────────────────────────
+section('T7 — exact ties: the RIGHTMOST span is sacrificed');
+// ───────────────────────────────────────────────────────────────────────────
+// Same priority AND same semanticScore. Title order encodes hierarchy (brand
+// and identity first, variants last), so the trailing span must go first.
+{
+  const exactTies = [
+    { value: 'Brandzzzz Nameeee',  priority: 5, semanticScore: 1000, role: 'BRAND',        wordCount:2, startIdx:0 },
+    { value: 'Firstcore Identity', priority: 4, semanticScore: 850,  role: 'CORE_PRODUCT', wordCount:2, startIdx:1 },
+    { value: 'Secondcore Partsss', priority: 4, semanticScore: 850,  role: 'CORE_PRODUCT', wordCount:2, startIdx:2 },
+    { value: 'Trailing Variantzz', priority: 4, semanticScore: 850,  role: 'CORE_PRODUCT', wordCount:2, startIdx:3 }
+  ];
+  const un = exactTies.map(s=>s.value).join(' ') + ' Pack of 3 New';
+  checkTrue('T7-pre fixture exceeds 80 chars', un.length > 80, `${un.length}`);
+  const out = sandbox.buildTitleFromSpans(exactTies, 3, '', '', null);
+  console.log(`  unfitted (${un.length}) -> "${out}"  (${out.length})`);
+  checkTrue('T7a leading identity kept', out.includes('Firstcore Identity'), out);
+  checkTrue('T7b trailing tie dropped first', !out.includes('Trailing Variantzz'), out);
+  checkTrue('T7c brand kept', out.includes('Brandzzzz Nameeee'), out);
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+section('T8 — ZICAM real fixture (count only in current specifics)');
+// ───────────────────────────────────────────────────────────────────────────
+{
+  const ZB = 'Zicam Ultra Cold Remedy Zinc Rapidmelts Orange Cream';
+  [2, 3, 6, 10, 12].forEach(p => {
+    setCur({
+      upc: '732216300918', title: ZB, prod: { title: ZB }, brand: 'Zicam',
+      _canonicalSpecifics: {}, _specifics: { Count: '25 Count' },
+      _titleManual: false, _selectedPack: 1, _expDate: 'Oct 2027'
+    });
+    sandbox.window._packState = { baseTitle: ZB, curPack: p, shade: '', expDate: 'Oct 2027', els: {} };
+    const t = sandbox.rebuildTitle(ZB, p, '', 'Oct 2027');
+    const want = 25 * p;
+    console.log(`\n  Pack ${String(p).padStart(2)}: "${t}"  (${t.length})`);
+    checkTrue(`T8 pack ${p}: has "${want} Total"`, t.includes(`${want} Total`), t);
+    checkTrue(`T8 pack ${p}: keeps "Zicam"`, t.includes('Zicam'), t);
+    checkTrue(`T8 pack ${p}: keeps "Cold Remedy"`, t.includes('Cold Remedy'), t);
+    checkTrue(`T8 pack ${p}: keeps "Zinc Rapidmelts"`, t.includes('Zinc Rapidmelts'), t);
+    checkTrue(`T8 pack ${p}: has "Exp 10/27"`, t.includes('Exp 10/27'), t);
+    checkTrue(`T8 pack ${p}: has "Pack of ${p}"`, t.includes('Pack of ' + p), t);
+    check(`T8 pack ${p}: exactly one New`, sandbox.countStandaloneNewTokens(t), 1);
+    checkTrue(`T8 pack ${p}: <= 80 chars`, t.length <= 80, `${t.length}`);
+  });
+}
+
 console.log('\n' + '═'.repeat(78));
 console.log('TIE-BREAK REGRESSION SUMMARY');
 console.log('═'.repeat(78));

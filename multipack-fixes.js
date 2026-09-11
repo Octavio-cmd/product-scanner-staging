@@ -55,6 +55,34 @@ function psNormalizeUnitToken(unit) {
   return u;
 }
 
+// The three specifics fields app.js maps onto the single C:Size column
+// (app.js:9067 — 'Size', 'Count' and 'Unit Quantity' all become 'C:Size'),
+// so the per-unit count can legitimately live in any of them.
+var PS_COUNT_FIELDS = ['Size', 'Count', 'Unit Quantity'];
+
+// Reads a per-unit count out of a specifics bag under strict rules:
+//   - a value carrying a standalone "Total" is a bundle figure, never a fact
+//   - only a WHOLE leading integer token counts. "(\d+)" alone would read
+//     "4.76 oz" as 4, so a measurement must fall through to the next field
+//     instead of poisoning the count
+//   - range 1..9999
+// Returns null when nothing qualifies. Never guesses.
+function psScanSpecificsForCount(specs) {
+  if (!specs) return null;
+  for (var i = 0; i < PS_COUNT_FIELDS.length; i++) {
+    var raw = specs[PS_COUNT_FIELDS[i]];
+    if (!raw) continue;
+    var val = String(raw).trim();
+    if (/\bTotals?\b/i.test(val)) continue;
+    var m = val.match(/^(\d{1,4})(?:\s|$)/);
+    if (m) {
+      var num = parseInt(m[1], 10);
+      if (num > 0 && num < 10000) return num;
+    }
+  }
+  return null;
+}
+
 // ============================================================================
 // FIX 2 — CANONICAL UNIT COUNT HELPER
 // ============================================================================
@@ -78,21 +106,31 @@ function psGetCanonicalUnitCount(cur) {
   // The integer must be a WHOLE leading token — "(\d+)" alone would read
   // "4.76 oz" as 4. Requiring a following space or end-of-string makes a
   // measurement fall through to the next field instead of poisoning the count.
-  var PS_COUNT_FIELDS = ['Size', 'Count', 'Unit Quantity'];
-  if (cur._canonicalSpecifics) {
-    for (var fi = 0; fi < PS_COUNT_FIELDS.length; fi++) {
-      var rawVal = cur._canonicalSpecifics[PS_COUNT_FIELDS[fi]];
-      if (!rawVal) continue;
-      var val = String(rawVal).trim();
-      // A bundle total is not a per-unit fact — refuse it outright.
-      if (/\bTotals?\b/i.test(val)) continue;
-      var m = val.match(/^(\d{1,4})(?:\s|$)/);
-      if (m) {
-        var num = parseInt(m[1], 10);
-        if (num > 0 && num < 10000) return num;
-      }
-    }
-  }
+  var canonicalCount = psScanSpecificsForCount(cur._canonicalSpecifics);
+  if (canonicalCount) return canonicalCount;
+
+  // 11 sep 2026 (rev 3) — fall back to the CURRENT specifics.
+  //
+  // UPC 732216300918 (Zicam Ultra Cold Remedy Zinc Rapidmelts) exported with
+  // C:Size "25 Count" and no derived total. C:Size is emitted from
+  // it._specifics (app.js:9827 / :9964), NOT from _canonicalSpecifics, so a
+  // populated C:Size column says nothing about the canonical store — and for
+  // that product the canonical store held no count at all. Its title carries
+  // zero digits, so every title fallback below is inert too, and
+  // psDetectCount() never fires the confirm prompt that would set
+  // _countConfirmed. The count was knowable and simply out of reach.
+  //
+  // Canonical always wins: this runs only after the canonical scan came back
+  // empty, so a stale pack-derived value in _specifics can never override a
+  // real per-unit fact. Same safety rules apply either way — a value carrying
+  // "Total" is refused, and only a whole leading integer token is accepted.
+  //
+  // Weaker than canonical by nature: without a canonical peer there is no
+  // proof this value was not mutated by an earlier pack change. The "Total"
+  // refusal plus psApplyPackChange() restoring canonicals before export are
+  // the mitigations; the alternative is losing the total entirely.
+  var currentCount = psScanSpecificsForCount(cur._specifics);
+  if (currentCount) return currentCount;
 
   var COUNT_NOUNS = '(?:Count|Ct|Tablets?|Capsules?|Softgels?|Soft\\s?Gels?|Pellets?|Gumm(?:y|ies)|Strips?|Pads?|Packets?|Pieces?)';
 
@@ -346,8 +384,8 @@ function psFitTitleSemantic(baseText, optionalSegments, protectedTail, maxLen) {
 // The ladder is now:
 //   5     BRAND                       — never sacrificed
 //   4.5   "N Total"   (derived)       — a required commercial fact
-//   4.25  "N Each"    (derived)
 //   4     CORE_PRODUCT / numeric descriptors
+//   3.9   "N Each"    (derived)       — useful but optional
 //   2     filler
 // so descriptors yield to the bundle total, and the brand yields to nothing.
 function psBuildCountSegments(cur, packSize, baseText) {
@@ -367,7 +405,7 @@ function psBuildCountSegments(cur, packSize, baseText) {
   if (!baseStatesUnitCount) {
     segments.push({
       text: unitCount + (noun ? ' ' + psTitleCaseNoun(psPluralizeUnitNoun(noun, unitCount)) : '') + ' Each',
-      dropPriority: 4.25
+      dropPriority: 3.9
     });
   }
   if (totalCount && Number(packSize) >= 2) {
@@ -599,6 +637,7 @@ function restoreCanonicalSpecifics(cur, fieldNames) {
 
 var PS_MULTIPACK_API = {
   psGetCanonicalUnitCount: psGetCanonicalUnitCount,
+  psScanSpecificsForCount: psScanSpecificsForCount,
   psGetPackTotalCount: psGetPackTotalCount,
   psGetUnitNoun: psGetUnitNoun,
   psPluralizeUnitNoun: psPluralizeUnitNoun,
@@ -629,6 +668,7 @@ if (typeof window !== 'undefined') {
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
     psGetCanonicalUnitCount: psGetCanonicalUnitCount,
+    psScanSpecificsForCount: psScanSpecificsForCount,
     psGetPackTotalCount: psGetPackTotalCount,
     psGetUnitNoun: psGetUnitNoun,
     psPluralizeUnitNoun: psPluralizeUnitNoun,

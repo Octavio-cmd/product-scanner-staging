@@ -507,6 +507,78 @@ section('REAL BROWSER REGRESSION — UPC 851278001035 (count under "Count")');
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+section('REAL BROWSER REGRESSION — UPC 732216300918 (Zicam, count in _specifics)');
+// ─────────────────────────────────────────────────────────────────────────────
+// Real export carried C:Size "25 Count" yet no derived total: the count lived
+// only in cur._specifics (which is what the CSV column reads), the canonical
+// store was empty, and the title has zero digits so no fallback could fire.
+{
+  const ZB = 'Zicam Ultra Cold Remedy Zinc Rapidmelts Orange Cream';
+  const ZEXP = 'Oct 2027';
+  const ZEXP_R = 'Exp 10/27';
+  const ZUNIT = 25;
+
+  [2, 3, 6, 10, 12].forEach(p => {
+    setCur({
+      upc: '732216300918', title: ZB, prod: { title: ZB }, brand: 'Zicam',
+      category: '180959',
+      _canonicalProductName: null,
+      _canonicalSpecifics: {},                 // empty, as in the real session
+      _canonicalSpecificsLocked: true,
+      _specifics: { Count: '25 Count' },       // the only place the count lives
+      _titleManual: false, _selectedPack: 1, _expDate: ZEXP
+    });
+    sandbox.window._packState = {
+      baseTitle: ZB, curPack: p, shade: '', expDate: ZEXP,
+      baseUPC: '732216300918', baseBrand: 'Zicam', ebayBase: 10, discount: 0.95, els: {}
+    };
+
+    const t = sandbox.rebuildTitle(ZB, p, '', ZEXP);
+    const want = ZUNIT * p;
+    console.log(`\n  Pack ${p}: "${t}"  (${t.length})`);
+
+    checkTrue(`ZICAM pack ${p}: has "${want} Total"`, t.includes(`${want} Total`), t);
+    checkTrue(`ZICAM pack ${p}: keeps brand "Zicam"`, t.includes('Zicam'), t);
+    checkTrue(`ZICAM pack ${p}: keeps "Cold Remedy"`, t.includes('Cold Remedy'), t);
+    checkTrue(`ZICAM pack ${p}: has "${ZEXP_R}"`, t.includes(ZEXP_R), t);
+    checkTrue(`ZICAM pack ${p}: has "Pack of ${p}"`, t.includes('Pack of ' + p), t);
+    check(`ZICAM pack ${p}: exactly one New`, sandbox.countStandaloneNewTokens(t), 1);
+    checkTrue(`ZICAM pack ${p}: terminal New`, /\bNew$/.test(t), t);
+    checkTrue(`ZICAM pack ${p}: <= 80 chars`, t.length <= 80, `${t.length}`);
+
+    const c = getCur();
+    const d = sandbox.descForPack(
+      { intro: 'i', benefits: [], package_contents: 'the product', disclaimer: '' }, p, c);
+    checkTrue(`ZICAM pack ${p}: desc "${ZUNIT} count each"`,
+      d.package_contents.includes(`${ZUNIT} count each`), d.package_contents);
+    checkTrue(`ZICAM pack ${p}: desc "${want} total"`,
+      d.package_contents.includes(`${want} total`), d.package_contents);
+  });
+
+  // 1pk must not gain a derived total.
+  setCur({
+    upc: '732216300918', title: ZB, prod: { title: ZB }, brand: 'Zicam',
+    _canonicalSpecifics: {}, _specifics: { Count: '25 Count' },
+    _titleManual: false, _selectedPack: 1, _expDate: ZEXP
+  });
+  sandbox.window._packState = { baseTitle: ZB, curPack: 1, shade: '', expDate: ZEXP, els: {} };
+  const t1 = sandbox.rebuildTitle(ZB, 1, '', ZEXP);
+  console.log(`\n  Pack 1: "${t1}"  (${t1.length})`);
+  checkTrue('ZICAM pack 1: no derived "Total"', !/\bTotal\b/i.test(t1), t1);
+  checkTrue('ZICAM pack 1: no "Pack of"', !/Pack of/i.test(t1), t1);
+  check('ZICAM pack 1: exactly one New', sandbox.countStandaloneNewTokens(t1), 1);
+
+  // Canonical must still beat current specifics.
+  setCur({
+    upc: '732216300918', title: ZB, prod: { title: ZB }, brand: 'Zicam',
+    _canonicalSpecifics: { Count: '26 Count' },
+    _specifics: { Count: '52 Count' },
+    _titleManual: false, _selectedPack: 1, _expDate: ''
+  });
+  check('ZICAM canonical 26 beats current 52', sandbox.psGetCanonicalUnitCount(getCur()), 26);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 section('CSV FIXTURE OUTPUTS');
 // ─────────────────────────────────────────────────────────────────────────────
 csvRows.forEach(r => {
