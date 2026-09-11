@@ -5567,6 +5567,19 @@ function psDetectCount(title, category) {
   // piezas que trae adentro cada caja.
   t = t.replace(/\bpack of\s+\d+/gi, ' ');
 
+  // 11 sep 2026 — y por la MISMA razón se ignora el estado derivado del pack.
+  // El título de presentación ahora lleva "N Total" / "N Each", y esta función
+  // recibe cur._selectedTitle, no el título de la fuente. Con el UPC
+  // 732216300918 (25 por unidad, Pack 2) el título decía "50 Total" y la rama
+  // (c) devolvía 50 como si fuera el conteo POR UNIDAD. Aceptarlo dejaba
+  // _countConfirmed = 50 —la máxima autoridad— y el Pack 3 salía con 150 Total
+  // en vez de 75. Peor: el título siguiente decía 100 Total, y el prompt
+  // proponía 100. Un bucle cerrado: 25 → 50 → 100 → 200.
+  // Un total de bundle NUNCA puede ser candidato a conteo por unidad.
+  t = t.replace(/\b\d+\s*(?:ct|count)?\s*total\b/gi, ' ')
+       .replace(/\b\d+\s*(?:ct|count)?\s*(?:ea|each)\b/gi, ' ')
+       .replace(/\s{2,}/g, ' ');
+
   // a) número pegado a la unidad: "120ct", "8 Treatments"
   var m = t.match(new RegExp('\\b(\\d{1,4})\\s*(' + PS_COUNT_UNITS + ')\\b', 'i'));
   // b) con hasta dos palabras en medio: "30 Saline Packets", "8 foam Applicators"
@@ -5640,13 +5653,24 @@ async function _addBulkInternal() {
   var _tituloActual = (cur && (cur._selectedTitle || cur.title)) || '';
   var _det = psDetectCount(_tituloActual, (cur && cur.category) || '');
   if (_det && cur && !cur._countOK) {
+    // 11 sep 2026 — la propuesta sale del HECHO POR UNIDAD cuando se conoce.
+    // La cadena de autoridad se construyó sobre hechos por unidad; proponer lo
+    // detectado en el título invertía esa jerarquía y contradecía lo que el
+    // propio panel de specifics mostraba en pantalla ("Count = 25 Count" contra
+    // una propuesta de 50). Un valor prellenado se acepta por inercia, así que
+    // el camino de menor esfuerzo tiene que ser el correcto.
+    var _perUnit = (typeof psGetCanonicalUnitCount === 'function')
+      ? psGetCanonicalUnitCount(cur) : null;
+    var _propuesta = _perUnit || _det.num;
+    var _unidad = _perUnit ? 'por unidad' : _det.unit;
+
     var _resp = prompt(
       '📦 CONFIRMA LA CANTIDAD\n\n' +
-      'El sistema propone:  ' + _det.num + ' ' + _det.unit + '\n\n' +
+      'El sistema propone:  ' + _propuesta + ' ' + _unidad + '\n\n' +
       'Ese dato viene de la base de datos del UPC y NO siempre coincide\n' +
       'con la caja. Lee el frente del empaque y escribe la cantidad real.\n\n' +
       '(Deja el mismo número si está correcto)',
-      String(_det.num)
+      String(_propuesta)
     );
     if (_resp === null) return;            // canceló: no se guarda nada
     var _n = parseInt(String(_resp).replace(/[^0-9]/g, ''), 10);
@@ -5654,7 +5678,10 @@ async function _addBulkInternal() {
 
     cur._countConfirmed = _n;
     cur._countOK = true;
-    if (_n !== _det.num) {
+    // Se compara contra lo que se MOSTRÓ, no contra _det.num: si la propuesta
+    // vino del hecho por unidad y el operario la dejó igual, no hay corrección
+    // que aplicar al título aunque el número detectado fuera otro.
+    if (_n !== _propuesta) {
       var _nuevoTitulo = psApplyCount(_tituloActual, _n, (cur && cur.category) || '');
       cur.title = _nuevoTitulo;
       if (cur._selectedTitle) {
@@ -5665,7 +5692,7 @@ async function _addBulkInternal() {
       if (cur._specifics) { delete cur._specifics['Size']; }
       var _tEl = document.getElementById('title-input');
       if (_tEl) { _tEl.value = _nuevoTitulo; if (_tEl.dataset) _tEl.dataset.val = _nuevoTitulo; }
-      toast('✅ Corregido: ' + _det.num + ' → ' + _n + ' ' + _det.unit);
+      toast('✅ Corregido: ' + _propuesta + ' → ' + _n + ' ' + _unidad);
     }
   }
 
