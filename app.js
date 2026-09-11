@@ -4365,6 +4365,82 @@ function psProductionTitleFitter(ctx) {
 // Al cambiar el pack, los hechos por unidad vuelven a su valor canónico si el
 // valor mostrado es demostrablemente derivado del pack anterior (26 Count x 2
 // = 52 Count). Si no hay evidencia canónica NO se adivina: se conserva el dato.
+// ── MULTIPACK: EL CONTEO POR UNIDAD ES OBLIGATORIO EN PACKS DE 2+ ───────────
+// 11 sep 2026. Un listado "Pack of 3" sin total es un defecto comercial: el
+// comprador no sabe si recibe 75 piezas o 3. El dato es trivial para quien
+// tiene la caja delante e imposible de derivar en código — el UPC 732216300918
+// (Zicam) llegó dos veces con títulos distintos y sin un solo dígito, así que
+// psDetectCount() nunca disparó su prompt y el conteo no existía en ninguna
+// parte. En Pack 1 no se pide: sin bundle no hay total que derivar.
+
+// Packs que realmente se van a exportar: los activos del reparto si hay
+// inventario repartido, si no el pack seleccionado.
+function psActivePacksForExport() {
+  var inp = document.getElementById('split-total-input');
+  var total = inp ? (parseInt(String(inp.value).replace(/\D/g, ''), 10) || 0) : 0;
+  if (total > 0 && window._splitActive && typeof PACK_SIZES !== 'undefined') {
+    var act = PACK_SIZES.filter(function(p) { return window._splitActive[p]; });
+    if (act.length) return act;
+  }
+  var sel = (typeof cur !== 'undefined' && cur && (cur._selectedPack || cur.packSize)) ||
+            (window._packState && window._packState.curPack) || 1;
+  return [Number(sel) || 1];
+}
+
+// Entero 1-9999. Estricto a propósito: el prompt de conteo que ya existía usa
+// replace(/[^0-9]/g,'') y eso convierte "2.5" en 25 — un dato inventado. Aquí
+// un decimal se rechaza en vez de deformarse.
+function psParseConfirmedCount(raw) {
+  var s = String(raw == null ? '' : raw).trim();
+  if (!s) return null;
+  if (/\d[.,]\d/.test(s)) return null;   // 2.5 / 2,5 → no es un conteo
+  if (/^-/.test(s)) return null;         // negativo
+  var m = s.match(/^(\d{1,4})(?!\d)/);   // "25", "25 piezas"; "10000" no
+  if (!m) return null;
+  var n = parseInt(m[1], 10);
+  return (n >= 1 && n <= 9999) ? n : null;
+}
+
+// true → se puede exportar. false → el llamador DEBE abortar.
+function psRequireUnitCountForMultipack(curObj) {
+  if (!curObj) return true;
+
+  var packs = psActivePacksForExport();
+  var needsTotal = packs.some(function(p) { return Number(p) >= 2; });
+  if (!needsTotal) return true;                       // solo Pack 1: no se pide
+
+  if (psGetCanonicalUnitCount(curObj)) return true;   // ya se conoce
+  if (curObj._countOK && curObj._countConfirmed) return true;
+
+  var resp = prompt(
+    '📦 ¿CUÁNTAS PIEZAS TRAE CADA UNIDAD?\n\n' +
+    'Este producto se va a publicar en un paquete de 2 o más y no se pudo\n' +
+    'determinar automáticamente el conteo por unidad.\n\n' +
+    'Ejemplo: si cada frasco trae 25 piezas, escribe 25.\n\n' +
+    '(Cancelar = no se exportan los packs de 2 o más)',
+    ''
+  );
+  if (resp === null) return false;                    // cancelado
+
+  var n = psParseConfirmedCount(resp);
+  if (!n) {                                           // vacío / 0 / decimal / texto
+    toast('⚠️ Conteo inválido — no se exportaron los packs de 2+');
+    return false;
+  }
+
+  curObj._countConfirmed = n;
+  curObj._countOK = true;
+
+  // El título ya visible se construyó sin el conteo: hay que rehacerlo para
+  // que el total derivado entre antes de exportar.
+  if (typeof rebuildAndApplyTitle === 'function' && window._packState) {
+    try { rebuildAndApplyTitle(curObj._selectedPack || window._packState.curPack || 1); }
+    catch (e) { if (window._psDebug) window._psDebug('⚠️ rebuild tras conteo: ' + e.message); }
+  }
+  toast('✅ Conteo por unidad: ' + n);
+  return true;
+}
+
 function psApplyPackChange(curObj, newPack) {
   if (!curObj) return [];
   curObj._selectedPack = Number(newPack) || 1;
@@ -5591,6 +5667,17 @@ async function _addBulkInternal() {
       if (_tEl) { _tEl.value = _nuevoTitulo; if (_tEl.dataset) _tEl.dataset.val = _nuevoTitulo; }
       toast('✅ Corregido: ' + _det.num + ' → ' + _n + ' ' + _det.unit);
     }
+  }
+
+  // ── MULTIPACK: sin conteo por unidad no se exportan packs de 2+ ──────────
+  // El prompt de arriba solo aparece cuando psDetectCount() ENCONTRÓ un número
+  // en el título. Cuando no hay ninguno —el caso del UPC 732216300918— nunca se
+  // pregunta y el bundle sale sin total. Aquí se pide justo cuando falta y hace
+  // falta. Se aborta la operación COMPLETA en vez de exportar unos packs sí y
+  // otros no: un CSV a medias es más difícil de detectar que uno que no salió.
+  if (typeof psRequireUnitCountForMultipack === 'function' &&
+      !psRequireUnitCountForMultipack(cur)) {
+    return;
   }
 
   var EXP_REQ = window.PS_HEALTH_CATS;
