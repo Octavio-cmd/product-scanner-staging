@@ -3784,22 +3784,16 @@ function rebuildAndApplyTitle(n) {
   // actualizamos el número de "Pack of N" para que refleje el pack elegido,
   // conservando todo el texto que el usuario escribió.
   if (cur && cur._titleManual && cur._selectedTitle) {
-    var manualT = cur._selectedTitle;
-    if (Number(newPack) >= 2) {
-      // Pack de 2+: si ya tiene "Pack of N", actualiza el número;
-      // si no lo tiene, lo inserta antes de "New" (o al final).
-      if (/\bpack of \d+\b/i.test(manualT)) {
-        manualT = manualT.replace(/\bpack of \d+\b/i, 'Pack of ' + newPack);
-      } else if (/\bnew\b\s*$/i.test(manualT)) {
-        manualT = manualT.replace(/\s*\bnew\b\s*$/i, ' Pack of ' + newPack + ' New');
-      } else {
-        manualT = manualT.trim() + ' Pack of ' + newPack;
-      }
-    } else {
-      // Pack de 1: quitar cualquier "Pack of N" del título (1 pieza no es pack)
-      manualT = manualT.replace(/\s*\bpack of \d+\b/i, '').replace(/\s{2,}/g, ' ').trim();
-    }
-    title = manualT.substring(0, 80);
+    // 11 sep 2026 — multipack. ANTES: solo se reemplazaba el número de
+    // "Pack of N" con un regex y TODO lo demás se conservaba tal cual. Si el
+    // título editado a mano traía "52 Total" (26x2), al pasar a Pack 3 salía
+    // "52 Total Pack of 3 New": el total del pack anterior sobrevivía.
+    // AHORA: se conserva la redacción del usuario, pero el estado derivado
+    // (N Each / N Total / Pack of N) se borra y se recalcula contra el
+    // conteo canónico por unidad y el pack nuevo.
+    title = normalizeManualTitleForPackChange(
+      cur._selectedTitle, cur, newPack, { fit: psProductionTitleFitter }
+    );
   } else {
     title = rebuildTitle(state.baseTitle, newPack, shade, expDate);
   }
@@ -4233,6 +4227,15 @@ function annotateSpans(spans, base, curObj) {
   });
 }
 
+// PS_TITLE_TIEBREAK_NOTE (11 sep 2026, hallazgo — NO corregido aquí)
+// El desempate de abajo está invertido respecto a su propio comentario:
+// con prioridades iguales, sort((b.semanticScore) - (a.semanticScore)) deja el
+// span MÁS importante en el índice 0, y shift() borra justamente ese. O sea:
+// a igualdad de prioridad se sacrifica primero la marca antes que el relleno.
+// No se toca en esta integración porque cambiaría títulos ya en uso en
+// STAGING; se reporta aparte. El multipack no depende de este desempate: sus
+// segmentos derivados usan prioridades propias (3 y 3.5), nunca empates.
+//
 // Build title by keeping spans in original order, removing low-priority spans when over 80 chars
 function buildTitleFromSpans(spans, n, shade, expDate, curObj) {
   var suffix = '';
@@ -4287,6 +4290,60 @@ function buildTitleFromSpans(spans, n, shade, expDate, curObj) {
   return suffix.trim();
 }
 
+// ── MULTIPACK: AJUSTE DE TÍTULO POR PRIORIDAD SEMÁNTICA ─────────────────────
+// 11 sep 2026. Los segmentos derivados ("26 Strips Each", "78 Total") entran
+// como spans con prioridad propia, NO como corte posicional:
+//   prioridad 2  → relleno / descriptores secundarios  (se sacrifican primero)
+//   prioridad 3  → "N Each"
+//   prioridad 3.5→ "N Total"
+//   prioridad 4+ → marca e identidad crítica del producto (se conservan)
+// El sufijo (shade + expiración + "Pack of N" + "New") lo arma
+// buildTitleFromSpans y es INVIOLABLE: nunca se recorta.
+//
+// Se usan prioridades distintas a propósito: el desempate por semanticScore de
+// buildTitleFromSpans está invertido (ver nota en PS_TITLE_TIEBREAK_NOTE), así
+// que no se depende de él.
+function psFitTitleWithCounts(baseText, segments, packSize, shade, expDate, curObj) {
+  var spans = parseIntoSpans(String(baseText || ''));
+  annotateSpans(spans, String(baseText || ''), curObj);
+
+  (segments || []).forEach(function(seg) {
+    if (!seg || !seg.text) return;
+    spans.push({
+      value: seg.text,
+      wordCount: String(seg.text).split(/\s+/).length,
+      startIdx: spans.length,
+      priority: seg.dropPriority || 3,
+      role: 'DERIVED_COUNT',
+      semanticScore: 760
+    });
+  });
+
+  return buildTitleFromSpans(spans, packSize, shade, expDate, curObj);
+}
+
+// Fitter que se le inyecta a normalizeManualTitleForPackChange() para que la
+// producción NUNCA use el recortador de laboratorio (psFitTitleSemantic).
+function psProductionTitleFitter(ctx) {
+  var state = window._packState || {};
+  return psFitTitleWithCounts(
+    ctx.baseText, ctx.segments, ctx.packSize,
+    state.shade || '', state.expDate || '',
+    (typeof cur !== 'undefined' ? cur : null)
+  );
+}
+
+// ── MULTIPACK: CAMBIO DE PACK ───────────────────────────────────────────────
+// Al cambiar el pack, los hechos por unidad vuelven a su valor canónico si el
+// valor mostrado es demostrablemente derivado del pack anterior (26 Count x 2
+// = 52 Count). Si no hay evidencia canónica NO se adivina: se conserva el dato.
+function psApplyPackChange(curObj, newPack) {
+  if (!curObj) return [];
+  curObj._selectedPack = Number(newPack) || 1;
+  if (typeof restoreCanonicalSpecifics !== 'function') return [];
+  return restoreCanonicalSpecifics(curObj, ['Size', 'Count', 'Unit Quantity', 'Volume']);
+}
+
 function rebuildTitle(base, n, shade, expDate) {
   shade   = shade   || '';
   expDate = expDate || '';
@@ -4302,22 +4359,36 @@ function rebuildTitle(base, n, shade, expDate) {
     .replace(/\bnew\b\s*$/gi, '').replace(/\s{2,}/g, ' ').trim()
     .replace(/[·\-,\.]+\s*$/, '').trim();
 
-  // Parse into semantic spans (preserving original order)
-  var spans = parseIntoSpans(cleanBase);
+  // 11 sep 2026 — multipack: borrar el total derivado del pack ANTERIOR antes
+  // de recalcularlo. "52 Total" / "26ct Ea" son estado derivado, no identidad
+  // del producto: si sobreviven, el título dice "Pack of 3" con el total de 2.
+  cleanBase = cleanBase
+    .replace(/\s*\b\d+\s*(?:ct|count)?\s*Total\b/gi, ' ')
+    .replace(/\s*\bTotal\s+\d+\b/gi, ' ')
+    .replace(/\s*\b\d+\s*(?:ct|count)?\s*(?:Ea|Each)\b/gi, ' ')
+    .replace(/\s{2,}/g, ' ').trim();
 
-  // Annotate spans with priorities from structured data
-  annotateSpans(spans, cleanBase, typeof cur !== 'undefined' ? cur : null);
+  var _curObj = (typeof cur !== 'undefined') ? cur : null;
 
-  // Build title by removing low-priority complete spans when over 80 chars
-  var output = buildTitleFromSpans(spans, n, shade, expDate, typeof cur !== 'undefined' ? cur : null);
+  // Segmentos derivados del conteo canónico por unidad x pack actual.
+  var _segments = (typeof psBuildCountSegments === 'function')
+    ? psBuildCountSegments(_curObj, n, cleanBase)
+    : [];
+
+  // Ajuste por prioridad semántica (marca e identidad se conservan; el sufijo
+  // shade + expiración + "Pack of N" + "New" es inviolable).
+  var output = psFitTitleWithCounts(cleanBase, _segments, n, shade, expDate, _curObj);
 
   // Hard limit at 80 chars (safety fallback)
   if (output.length > 80) {
     output = output.substring(0, 80).replace(/\s+\S*$/, '').trim();
   }
 
+  // Invariante: exactamente un "New" suelto y terminal.
+  if (typeof normalizeDuplicateNew === 'function') output = normalizeDuplicateNew(output);
+
   // Apply title case correction
-  return psFixTitleCase(output, (typeof cur !== 'undefined' && cur && cur.brand) || '');
+  return psFixTitleCase(output, (_curObj && _curObj.brand) || '');
 }
 
 // ── CORRECCIÓN DE MAYÚSCULAS EN EL TÍTULO ───────────────────────────────────
@@ -4416,6 +4487,20 @@ function pickPack(n) {
   var dispEl = els.display|| document.getElementById('pack-sel-display');
 
   if (skuEl)  { skuEl.textContent  = sku;   skuEl.dataset.val   = sku;   }
+
+  // 11 sep 2026 — multipack. El pack cambió: los hechos POR UNIDAD vuelven a
+  // su valor canónico si el mostrado es demostrablemente derivado del pack
+  // anterior (26 Count x 2 = 52 Count). Va ANTES de reconstruir el título
+  // para que el conteo que se usa ya sea el canónico.
+  if (cur && typeof psApplyPackChange === 'function') {
+    var _packAudit = psApplyPackChange(cur, n);
+    if (window._psDebug && _packAudit && _packAudit.length) {
+      _packAudit.forEach(function(a) {
+        window._psDebug('📦 pack→' + n + ' ' + a.field + ': ' + a.action + ' — ' + a.reason);
+      });
+    }
+  }
+
   rebuildAndApplyTitle(n);
 
   // Save on cur
@@ -5507,6 +5592,16 @@ async function _addBulkInternal() {
   }
 
   if (!cur) return;
+
+  // ── MULTIPACK: última barrera antes de exportar ─────────────────────────
+  // 11 sep 2026. Si el pack cambió sin pasar por pickPack() (o las specifics
+  // se regeneraron después), C:Size podría seguir con el total del pack
+  // anterior. Se re-aplica la restauración canónica: solo toca el valor
+  // cuando es demostrablemente derivado del pack; si no hay canónico, no
+  // adivina y conserva el dato.
+  if (typeof psApplyPackChange === 'function') {
+    psApplyPackChange(cur, cur._selectedPack || (window._packState && window._packState.curPack) || 1);
+  }
 
   // ── Si el reparto de inventario tiene unidades → agregar TODOS los
   //    packs activos (los no excluidos con ✕), cada uno con su foto ──
@@ -7950,7 +8045,15 @@ async function psGenerateSpecifics(source){
         'Active Ingredients',
         'Count',
         'Dosage',
-        'Dosage or Strength'
+        'Dosage or Strength',
+        // 11 sep 2026 — multipack count fix. Size / Volume / Unit Quantity son
+        // HECHOS POR UNIDAD ("26 Count", "16 oz"): no cambian con el pack.
+        // Sin guardarlos aquí no existe evidencia canónica contra la cual
+        // comparar al cambiar de pack, y por eso C:Size se quedaba en
+        // "52 Count" (26x2) mientras el título ya decía "Pack of 3".
+        'Size',
+        'Volume',
+        'Unit Quantity'
       ];
       // Cache immutable values from this generation
       IMMUTABLE_FIELDS.forEach(function(field) {
@@ -7958,6 +8061,16 @@ async function psGenerateSpecifics(source){
           cur._canonicalSpecifics[field] = clean[field];
         }
       });
+      // El conteo confirmado contra la caja manda sobre lo que diga la IA:
+      // es el único dato que alguien verificó con el producto en la mano.
+      if (cur._countConfirmed > 0) {
+        var _cs = String(cur._canonicalSpecifics['Size'] || '');
+        var _csNum = _cs.match(/^(\d+)/);
+        if (!_cs || (_csNum && parseInt(_csNum[1], 10) !== cur._countConfirmed)) {
+          var _unit = (_cs.replace(/^\d+\s*/, '') || 'Count').trim();
+          cur._canonicalSpecifics['Size'] = cur._countConfirmed + ' ' + _unit;
+        }
+      }
       cur._canonicalSpecificsLocked = true;
     }
 
@@ -8818,6 +8931,30 @@ function descForPack(desc, packs, curObj) {
 
   }
 
+  // ── MULTIPACK: conteo por unidad y total derivado ───────────────────────
+  // 11 sep 2026. El conteo sale SIEMPRE de los hechos canónicos por unidad
+  // por el pack actual — nunca del título de listing (que puede estar editado
+  // a mano y traer el total de un pack anterior).
+  //   26 strips each, 78 strips total     (26 x 3)
+  // Si no se conoce el sustantivo de la unidad NO se inventa: "26 count each".
+  var _countPhrase = '';
+  if (typeof psGetCanonicalUnitCount === 'function') {
+    var _unitCount = psGetCanonicalUnitCount(curObj);
+    if (_unitCount) {
+      var _totalCount = _unitCount * packs;
+      var _noun = (typeof psGetUnitNoun === 'function') ? psGetUnitNoun(curObj) : null;
+      if (_noun) {
+        _countPhrase = ', ' + _unitCount + ' ' + psPluralizeUnitNoun(_noun, _unitCount) + ' each';
+        if (packs > 1) {
+          _countPhrase += ', ' + _totalCount + ' ' + psPluralizeUnitNoun(_noun, _totalCount) + ' total';
+        }
+      } else {
+        _countPhrase = ', ' + _unitCount + ' count each';
+        if (packs > 1) _countPhrase += ', ' + _totalCount + ' total';
+      }
+    }
+  }
+
   // ── Generate package_contents with clean architecture (no duplication) ──
   // packageContents describes WHAT the units are, WITHOUT the pack count
   var packageContents = '';
@@ -8853,7 +8990,7 @@ function descForPack(desc, packs, curObj) {
     } else {
       bundleIntro += ' of the product';
     }
-    return bundleIntro + '. ' + desc;
+    return bundleIntro + _countPhrase + '. ' + desc;
   }
 
   // Structured description object (from Claude/Algopix)
@@ -8871,7 +9008,7 @@ function descForPack(desc, packs, curObj) {
     }
   }
 
-  var finalPackageContents = bundlePrefix + bundleContents;
+  var finalPackageContents = bundlePrefix + bundleContents + _countPhrase;
 
   return {
     intro: desc.intro || '',  // Original intro, untouched (product facts only)

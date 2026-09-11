@@ -310,7 +310,45 @@ function psFitTitleSemantic(baseText, optionalSegments, protectedTail, maxLen) {
 // Preserves the operator's product wording, discards derived state that the
 // previous pack size produced, and re-derives it for the new pack size.
 
-function normalizeManualTitleForPackChange(manualTitle, cur, newPack) {
+// Derived count segments for the title, shared by the manual-edit path and the
+// normal rebuild path so both emit one identical format:
+//   "<unitCount> <Noun> Each <totalCount> Total"
+// The noun rides the per-unit segment only; the total stays a bare number.
+//
+// dropPriority doubles as the span priority used by the production span
+// fitter: "Each" (3) is sacrificed before "Total" (3.5), and both are
+// sacrificed before brand / core identity (>=4) but after filler (2).
+function psBuildCountSegments(cur, packSize, baseText) {
+  var unitCount = psGetCanonicalUnitCount(cur);
+  if (!unitCount) return [];
+  var noun = psGetUnitNoun(cur);
+  var totalCount = (Number(packSize) > 0) ? unitCount * Number(packSize) : null;
+
+  var segments = [];
+
+  // If the base title already states the per-unit count ("... Strips 26 Count"),
+  // adding "26 Strips Each" would print the same number twice. The base is
+  // already the per-unit statement, so only the derived total is appended.
+  var baseStatesUnitCount = baseText &&
+    new RegExp('\\b' + unitCount + '\\b').test(String(baseText));
+
+  if (!baseStatesUnitCount) {
+    segments.push({
+      text: unitCount + (noun ? ' ' + psTitleCaseNoun(psPluralizeUnitNoun(noun, unitCount)) : '') + ' Each',
+      dropPriority: 3
+    });
+  }
+  if (totalCount && Number(packSize) >= 2) {
+    segments.push({ text: totalCount + ' Total', dropPriority: 3.5 });
+  }
+  return segments;
+}
+
+// opts.fit lets production inject its own fitter. Production MUST pass one
+// backed by parseIntoSpans()/annotateSpans()/buildTitleFromSpans(); the
+// default below is the lab fitter and is not for production use.
+//   opts.fit({ baseText, segments, packSize, maxLen }) -> string
+function normalizeManualTitleForPackChange(manualTitle, cur, newPack, opts) {
   if (!manualTitle || !(Number(newPack) >= 1)) return manualTitle;
 
   var result = String(manualTitle);
@@ -334,26 +372,24 @@ function normalizeManualTitleForPackChange(manualTitle, cur, newPack) {
   if (Number(newPack) >= 2) tail += 'Pack of ' + Number(newPack) + ' ';
   tail += 'New';
 
-  // Title format (per spec): "<unitCount> <Noun> Each <total> Total Pack of N New"
-  // The noun rides the per-unit segment only; the total stays a bare number so
-  // the derived figure is unambiguous and the suffix stays short.
-  var segments = [];
-  if (unitCount) {
-    segments.push({
-      text: unitCount + (noun ? ' ' + psTitleCaseNoun(psPluralizeUnitNoun(noun, unitCount)) : '') + ' Each',
-      dropPriority: 1
-    });
-  }
-  if (totalCount && Number(newPack) >= 2) {
-    segments.push({ text: totalCount + ' Total', dropPriority: 2 });
-  }
+  var segments = psBuildCountSegments(cur, newPack, result);
 
   // Remove any condition "New" left inside the operator's wording before fitting.
   var baseTokens = result.split(/\s+/).filter(Boolean).filter(function (t, i, arr) {
     return !(/^new$/i.test(t) && !psIsIdentityNewAt(arr, i));
   });
 
-  var fitted = psFitTitleSemantic(baseTokens.join(' '), segments, tail, PS_MAX_TITLE_LEN);
+  var fitted;
+  if (opts && typeof opts.fit === 'function') {
+    fitted = opts.fit({
+      baseText: baseTokens.join(' '),
+      segments: segments,
+      packSize: Number(newPack),
+      maxLen: PS_MAX_TITLE_LEN
+    });
+  } else {
+    fitted = psFitTitleSemantic(baseTokens.join(' '), segments, tail, PS_MAX_TITLE_LEN);
+  }
   return normalizeDuplicateNew(fitted);
 }
 
@@ -529,6 +565,35 @@ function restoreCanonicalSpecifics(cur, fieldNames) {
 // EXPORT
 // ============================================================================
 
+var PS_MULTIPACK_API = {
+  psGetCanonicalUnitCount: psGetCanonicalUnitCount,
+  psGetPackTotalCount: psGetPackTotalCount,
+  psGetUnitNoun: psGetUnitNoun,
+  psPluralizeUnitNoun: psPluralizeUnitNoun,
+  psTitleCaseNoun: psTitleCaseNoun,
+  psParseMeasure: psParseMeasure,
+  psIsProvenPackDerived: psIsProvenPackDerived,
+  psBuildCountSegments: psBuildCountSegments,
+  countStandaloneNewTokens: countStandaloneNewTokens,
+  normalizeManualTitleForPackChange: normalizeManualTitleForPackChange,
+  descForPackFixed: descForPackFixed,
+  restoreCanonicalSpecifics: restoreCanonicalSpecifics,
+  normalizeDuplicateNew: normalizeDuplicateNew,
+  PS_MAX_TITLE_LEN: PS_MAX_TITLE_LEN
+};
+
+// Browser: publish onto window so app.js (a plain script) can call these.
+// NOTE: psFitTitleSemantic is intentionally left OUT of this map, but being a
+// top-level function declaration in a classic script it is a global anyway.
+// The enforceable invariant is therefore "production never CALLS it", which
+// test-multipack-integration.js asserts against the app.js source text.
+if (typeof window !== 'undefined') {
+  for (var _psKey in PS_MULTIPACK_API) {
+    if (PS_MULTIPACK_API.hasOwnProperty(_psKey)) window[_psKey] = PS_MULTIPACK_API[_psKey];
+  }
+  window.PS_MULTIPACK_API = PS_MULTIPACK_API;
+}
+
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
     psGetCanonicalUnitCount: psGetCanonicalUnitCount,
@@ -538,7 +603,8 @@ if (typeof module !== 'undefined' && module.exports) {
     psTitleCaseNoun: psTitleCaseNoun,
     psParseMeasure: psParseMeasure,
     psIsProvenPackDerived: psIsProvenPackDerived,
-    psFitTitleSemantic: psFitTitleSemantic,
+    psFitTitleSemantic: psFitTitleSemantic, // lab/test only — never in production
+    psBuildCountSegments: psBuildCountSegments,
     countStandaloneNewTokens: countStandaloneNewTokens,
     normalizeManualTitleForPackChange: normalizeManualTitleForPackChange,
     descForPackFixed: descForPackFixed,

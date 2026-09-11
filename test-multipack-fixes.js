@@ -214,14 +214,29 @@ section('TEST F — unit noun matrix');
     _specifics: {},
     _titleManual: true
   };
+  // Base already states the per-unit count ("240 Pellets"), so the "N Each"
+  // segment is suppressed — otherwise the title would print 240 twice.
   const pelletTitle = fx.normalizeManualTitleForPackChange('240 Pellets New Pack of 2 New', pelletCur, 3);
   console.log(`  spec-format title: "${pelletTitle}"`);
-  checkTrue('F9 noun rides the Each segment ("240 Pellets Each")',
-    pelletTitle.includes('240 Pellets Each'), pelletTitle);
+  checkTrue('F9 no duplicated unit count', (pelletTitle.match(/\b240\b/g) || []).length === 1, pelletTitle);
   checkTrue('F9a total is a bare number ("720 Total")',
-    pelletTitle.includes('720 Total') && !pelletTitle.includes('720 pellets Total'), pelletTitle);
+    pelletTitle.includes('720 Total') && !/720\s+pellets/i.test(pelletTitle), pelletTitle);
   checkTrue('F9b ends "Pack of 3 New"', pelletTitle.endsWith('Pack of 3 New'), pelletTitle);
   check('F9c exactly one condition New', fx.countStandaloneNewTokens(pelletTitle), 1);
+
+  // When the base does NOT state the count, the "N Noun Each" segment appears.
+  const noCountCur = {
+    title: 'Boiron Arnicare',
+    _countConfirmed: 240,
+    _canonicalProductName: 'Boiron Arnicare',
+    _canonicalSpecifics: { Size: '240 Count', 'Item Form': 'Pellet' },
+    _specifics: {}, _titleManual: true
+  };
+  const withEach = fx.normalizeManualTitleForPackChange('Boiron Arnicare New', noCountCur, 3);
+  console.log(`  base without count: "${withEach}"`);
+  checkTrue('F10 "240 Pellets Each" emitted when base lacks the count',
+    withEach.includes('240 Pellets Each'), withEach);
+  checkTrue('F10a total present', withEach.includes('720 Total'), withEach);
 
   // Singular pluralization guard.
   const single = {
