@@ -333,8 +333,23 @@ function psFitTitleSemantic(baseText, optionalSegments, protectedTail, maxLen) {
 // The noun rides the per-unit segment only; the total stays a bare number.
 //
 // dropPriority doubles as the span priority used by the production span
-// fitter: "Each" (3) is sacrificed before "Total" (3.5), and both are
-// sacrificed before brand / core identity (>=4) but after filler (2).
+// fitter.
+//
+// 11 sep 2026 (rev 2) — raised from 3 / 3.5 to 4.25 / 4.5. The original
+// values assumed ordinary descriptors would sit at priority 2, but
+// annotateSpans() lifts anything containing a digit, and every CORE_PRODUCT
+// span, to 4. On a real title almost nothing stays below 4, so the derived
+// total was the FIRST thing the 80-char loop sacrificed. UPC 851278001035
+// ("Zellies Dental Gum Spearmint 100 Pieces 4.76oz Sugar Free Xylitol Gum",
+// 69 chars) lost "300 Total" for exactly this reason.
+//
+// The ladder is now:
+//   5     BRAND                       — never sacrificed
+//   4.5   "N Total"   (derived)       — a required commercial fact
+//   4.25  "N Each"    (derived)
+//   4     CORE_PRODUCT / numeric descriptors
+//   2     filler
+// so descriptors yield to the bundle total, and the brand yields to nothing.
 function psBuildCountSegments(cur, packSize, baseText) {
   var unitCount = psGetCanonicalUnitCount(cur);
   if (!unitCount) return [];
@@ -352,11 +367,11 @@ function psBuildCountSegments(cur, packSize, baseText) {
   if (!baseStatesUnitCount) {
     segments.push({
       text: unitCount + (noun ? ' ' + psTitleCaseNoun(psPluralizeUnitNoun(noun, unitCount)) : '') + ' Each',
-      dropPriority: 3
+      dropPriority: 4.25
     });
   }
   if (totalCount && Number(packSize) >= 2) {
-    segments.push({ text: totalCount + ' Total', dropPriority: 3.5 });
+    segments.push({ text: totalCount + ' Total', dropPriority: 4.5 });
   }
   return segments;
 }

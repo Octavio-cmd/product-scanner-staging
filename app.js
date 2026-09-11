@@ -4227,14 +4227,20 @@ function annotateSpans(spans, base, curObj) {
   });
 }
 
-// PS_TITLE_TIEBREAK_NOTE (11 sep 2026, hallazgo — NO corregido aquí)
-// El desempate de abajo está invertido respecto a su propio comentario:
-// con prioridades iguales, sort((b.semanticScore) - (a.semanticScore)) deja el
-// span MÁS importante en el índice 0, y shift() borra justamente ese. O sea:
-// a igualdad de prioridad se sacrifica primero la marca antes que el relleno.
-// No se toca en esta integración porque cambiaría títulos ya en uso en
-// STAGING; se reporta aparte. El multipack no depende de este desempate: sus
-// segmentos derivados usan prioridades propias (3 y 3.5), nunca empates.
+// PS_TITLE_TIEBREAK_NOTE (11 sep 2026 — CORREGIDO)
+// El desempate de abajo estaba invertido respecto a su propio comentario: con
+// (b.semanticScore - a.semanticScore) el span MÁS importante quedaba en el
+// índice 0 y shift() borraba justamente ese, sacrificando la marca antes que
+// el relleno a igualdad de prioridad.
+//
+// Se dejó sin tocar en la integración inicial porque el multipack no dependía
+// de él (sus segmentos usaban prioridades 3 / 3.5, sin empates) y cambiarlo
+// alteraba títulos largos ya en uso. Al subir el total derivado a 4.5 (ver
+// psFitTitleWithCounts) el bucle SÍ alcanza el grupo empatado en prioridad 4,
+// y el comparador invertido pasó a descartar la identidad del producto:
+//   total p=4.5 + desempate invertido -> "Zellies Dental 100 4.76oz Sugar Free
+//   Xylitol Gum 300 Total Pack of 3 New"   (pierde "Gum Spearmint")
+// Corregirlo es por tanto parte inseparable de la corrección del total.
 //
 // Build title by keeping spans in original order, removing low-priority spans when over 80 chars
 function buildTitleFromSpans(spans, n, shade, expDate, curObj) {
@@ -4268,9 +4274,14 @@ function buildTitleFromSpans(spans, n, shade, expDate, curObj) {
       if (a.priority !== b.priority) {
         return a.priority - b.priority; // Lower priority first
       }
-      // Tie-breaker: prefer keeping spans with higher semantic importance
-      // (Subtract because we're sorting ascending but want higher importance to stay)
-      return (b.semanticScore || 0) - (a.semanticScore || 0);
+      // Tie-breaker: prefer keeping spans with higher semantic importance.
+      // 11 sep 2026 — este comparador estaba INVERTIDO respecto a su propio
+      // contrato: con (b - a) el span MÁS importante quedaba en el índice 0 y
+      // shift() borraba justamente ese. A igualdad de prioridad se sacrificaba
+      // la marca antes que el relleno. Se corrige a (a - b): el de MENOR
+      // importancia semántica sale primero, que es lo que el comentario
+      // siempre dijo. Ver PS_TITLE_TIEBREAK_NOTE.
+      return (a.semanticScore || 0) - (b.semanticScore || 0);
     });
 
     // Remove the lowest-priority span (or lowest semantic importance if priority is tied)
@@ -4293,16 +4304,19 @@ function buildTitleFromSpans(spans, n, shade, expDate, curObj) {
 // ── MULTIPACK: AJUSTE DE TÍTULO POR PRIORIDAD SEMÁNTICA ─────────────────────
 // 11 sep 2026. Los segmentos derivados ("26 Strips Each", "78 Total") entran
 // como spans con prioridad propia, NO como corte posicional:
-//   prioridad 2  → relleno / descriptores secundarios  (se sacrifican primero)
-//   prioridad 3  → "N Each"
-//   prioridad 3.5→ "N Total"
-//   prioridad 4+ → marca e identidad crítica del producto (se conservan)
+//   prioridad 5    → BRAND (nunca se sacrifica)
+//   prioridad 4.5  → "N Total"  (dato comercial obligatorio)
+//   prioridad 4.25 → "N Each"
+//   prioridad 4    → CORE_PRODUCT y descriptores numéricos
+//   prioridad 2    → relleno
 // El sufijo (shade + expiración + "Pack of N" + "New") lo arma
 // buildTitleFromSpans y es INVIOLABLE: nunca se recorta.
 //
-// Se usan prioridades distintas a propósito: el desempate por semanticScore de
-// buildTitleFromSpans está invertido (ver nota en PS_TITLE_TIEBREAK_NOTE), así
-// que no se depende de él.
+// rev 2: antes eran 3 / 3.5, por debajo de TODO descriptor, así que el total
+// derivado era lo PRIMERO que el bucle de 80 caracteres sacrificaba. Con el
+// UPC 851278001035 ("Zellies Dental Gum Spearmint 100 Pieces 4.76oz Sugar
+// Free Xylitol Gum", 69 chars) se perdía "300 Total" en cada pack. Los
+// descriptores ceden ahora ante el total; la marca no cede ante nada.
 function psFitTitleWithCounts(baseText, segments, packSize, shade, expDate, curObj) {
   var spans = parseIntoSpans(String(baseText || ''));
   annotateSpans(spans, String(baseText || ''), curObj);
