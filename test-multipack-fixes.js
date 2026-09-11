@@ -350,6 +350,52 @@ section('TEST H — manual-edit normalization + derived totals + description mat
 }
 
 // ============================================================================
+
+// ============================================================================
+// TEST G — CANONICAL COUNT FIELD COVERAGE (real fixture UPC 851278001035)
+// ============================================================================
+// app.js:9067 maps Size, Count AND Unit Quantity onto the C:Size column, so
+// the per-unit count can live in any of the three. Reading only 'Size' let a
+// real product ship 12 listings with no derived total in the title.
+
+section('TEST G — canonical count field coverage');
+
+function gCur(canon) {
+  return {
+    title: 'Gum Spearmint Sugar Free 100 4.76oz Pack',
+    prod: { title: 'Gum Spearmint Sugar Free 100 4.76oz Pack' },
+    brand: 'Gum',
+    _canonicalProductName: 'Gum Spearmint Sugar Free 100 4.76oz Pack',
+    _canonicalSpecifics: canon,
+    _specifics: {}
+  };
+}
+
+check('G-A Size "100"',                fx.psGetCanonicalUnitCount(gCur({ Size: '100' })), 100);
+check('G-B Count "100"',               fx.psGetCanonicalUnitCount(gCur({ Count: '100' })), 100);
+check('G-C Unit Quantity "100"',       fx.psGetCanonicalUnitCount(gCur({ 'Unit Quantity': '100' })), 100);
+check('G-D Size "100 Count"',          fx.psGetCanonicalUnitCount(gCur({ Size: '100 Count' })), 100);
+check('G-E no canonical specifics',    fx.psGetCanonicalUnitCount(gCur({})), null);
+check('G-F reject "300 Total"',        fx.psGetCanonicalUnitCount(gCur({ Size: '300 Total' })), null);
+check('G-F2 reject "300 total" lower', fx.psGetCanonicalUnitCount(gCur({ Count: '300 total' })), null);
+check('G-G Size "4.76 oz" + Count "100" -> 100',
+      fx.psGetCanonicalUnitCount(gCur({ Size: '4.76 oz', Count: '100' })), 100);
+
+// A measurement alone must never be mistaken for a count.
+check('G-H Size "4.76 oz" alone -> null',
+      fx.psGetCanonicalUnitCount(gCur({ Size: '4.76 oz' })), null);
+check('G-I field order: Size wins over Count',
+      fx.psGetCanonicalUnitCount(gCur({ Size: '50', Count: '100' })), 50);
+// Contaminated first field must not block a clean later one.
+check('G-J Size "300 Total" + Count "100" -> 100',
+      fx.psGetCanonicalUnitCount(gCur({ Size: '300 Total', Count: '100' })), 100);
+
+// Derived totals across the real pack matrix.
+[[2,200],[3,300],[6,600],[10,1000],[12,1200]].forEach(function(pair){
+  check('G-K pack ' + pair[0] + ' -> ' + pair[1] + ' total',
+        fx.psGetPackTotalCount(gCur({ Count: '100' }), pair[0]), pair[1]);
+});
+
 console.log('\n' + '═'.repeat(78));
 console.log('TEST SUMMARY');
 console.log('═'.repeat(78));

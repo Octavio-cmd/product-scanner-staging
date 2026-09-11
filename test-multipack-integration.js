@@ -442,6 +442,71 @@ section('REGRESSION — untouched fields survive pack changes');
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+section('REAL BROWSER REGRESSION — UPC 851278001035 (count under "Count")');
+// ─────────────────────────────────────────────────────────────────────────────
+// The real preview run shipped 12 listings whose titles carried no derived
+// total, because the canonical count sat in 'Count', not 'Size'. Observed:
+//   "Gum Spearmint Sugar Free 100 4.76oz Pack Exp 07/30 Pack of 3 New"
+{
+  const GUM_BASE = 'Gum Spearmint Sugar Free 100 4.76oz Pack';
+  const GUM_EXP = 'Jul 2030';          // renders as "Exp 07/30"
+  const GUM_EXP_RENDERED = 'Exp 07/30';
+  const GUM_UNIT = 100;
+
+  // The count deliberately lives in 'Count' + a measurement sits in 'Size',
+  // which is exactly the shape that used to defeat the helper.
+  const gumCanon = { Count: '100', Size: '4.76 oz' };
+
+  [2, 3, 6, 10, 12].forEach(p => {
+    setCur({
+      upc: '851278001035',
+      title: GUM_BASE,
+      prod: { title: GUM_BASE },
+      brand: 'Gum',
+      category: '180959',
+      _canonicalProductName: null,
+      _canonicalSpecifics: Object.assign({}, gumCanon),
+      _canonicalSpecificsLocked: true,
+      _specifics: Object.assign({}, gumCanon),
+      _titleManual: false,
+      _selectedPack: 1,
+      _expDate: GUM_EXP
+    });
+    sandbox.window._packState = {
+      baseTitle: GUM_BASE, curPack: p, shade: '', expDate: GUM_EXP,
+      baseUPC: '851278001035', baseBrand: 'Gum', ebayBase: 10, discount: 0.95, els: {}
+    };
+
+    const title = sandbox.rebuildTitle(GUM_BASE, p, '', GUM_EXP);
+    const want = GUM_UNIT * p;
+    console.log(`\n  Pack ${p}: "${title}"  (${title.length})`);
+
+    checkTrue(`GUM pack ${p}: has "${want} Total"`, new RegExp(`\\b${want} Total\\b`).test(title), title);
+    checkTrue(`GUM pack ${p}: has "Pack of ${p}"`, title.includes('Pack of ' + p), title);
+    checkTrue(`GUM pack ${p}: has "${GUM_EXP_RENDERED}"`, title.includes(GUM_EXP_RENDERED), title);
+    check(`GUM pack ${p}: exactly one New`, sandbox.countStandaloneNewTokens(title), 1);
+    checkTrue(`GUM pack ${p}: terminal New`, /\bNew$/.test(title), title);
+    checkTrue(`GUM pack ${p}: <= 80 chars`, title.length <= 80, `${title.length}`);
+    checkTrue(`GUM pack ${p}: measurement 4.76 not read as count`,
+      !new RegExp(`\\b${4 * p} Total\\b`).test(title), title);
+
+    // C:Size must stay the canonical per-unit value.
+    const c = getCur();
+    sandbox.psApplyPackChange(c, p);
+    check(`GUM pack ${p}: C:Size canonical Count`, c._specifics.Count, '100');
+    check(`GUM pack ${p}: C:Size measurement untouched`, c._specifics.Size, '4.76 oz');
+
+    // Description math.
+    const d = sandbox.descForPack(
+      { intro: 'i', benefits: [], package_contents: 'the product', disclaimer: '' }, p, c);
+    checkTrue(`GUM pack ${p}: desc "${GUM_UNIT} count each"`,
+      d.package_contents.includes(`${GUM_UNIT} count each`), d.package_contents);
+    checkTrue(`GUM pack ${p}: desc "${want} total"`,
+      d.package_contents.includes(`${want} total`), d.package_contents);
+  });
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 section('CSV FIXTURE OUTPUTS');
 // ─────────────────────────────────────────────────────────────────────────────
 csvRows.forEach(r => {

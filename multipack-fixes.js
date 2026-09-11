@@ -68,12 +68,29 @@ function psGetCanonicalUnitCount(cur) {
     return cur._countConfirmed;
   }
 
-  if (cur._canonicalSpecifics && cur._canonicalSpecifics['Size']) {
-    var sizeVal = String(cur._canonicalSpecifics['Size']).trim();
-    var sizeMatch = sizeVal.match(/^(\d+)/);
-    if (sizeMatch) {
-      var num = parseInt(sizeMatch[1], 10);
-      if (num > 0 && num < 10000) return num;
+  // app.js maps THREE specifics fields onto the single C:Size column
+  // (app.js:9067 — 'Size', 'Count' and 'Unit Quantity' all become 'C:Size'),
+  // so the canonical per-unit count can legitimately live in any of them.
+  // Reading only 'Size' is what made UPC 851278001035 ("Gum Spearmint ...
+  // 100 4.76oz Pack") yield a null unit count: no "N Total" segment was ever
+  // built and the derived total never reached the title.
+  //
+  // The integer must be a WHOLE leading token — "(\d+)" alone would read
+  // "4.76 oz" as 4. Requiring a following space or end-of-string makes a
+  // measurement fall through to the next field instead of poisoning the count.
+  var PS_COUNT_FIELDS = ['Size', 'Count', 'Unit Quantity'];
+  if (cur._canonicalSpecifics) {
+    for (var fi = 0; fi < PS_COUNT_FIELDS.length; fi++) {
+      var rawVal = cur._canonicalSpecifics[PS_COUNT_FIELDS[fi]];
+      if (!rawVal) continue;
+      var val = String(rawVal).trim();
+      // A bundle total is not a per-unit fact — refuse it outright.
+      if (/\bTotals?\b/i.test(val)) continue;
+      var m = val.match(/^(\d{1,4})(?:\s|$)/);
+      if (m) {
+        var num = parseInt(m[1], 10);
+        if (num > 0 && num < 10000) return num;
+      }
     }
   }
 
