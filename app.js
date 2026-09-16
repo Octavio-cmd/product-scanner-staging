@@ -433,6 +433,14 @@ try {
 } catch(e) {}
 
 let bulk=[],cur=null;
+// 16 sep 2026 — "Regresar y corregir" (export-blocked recovery). Set to the
+// UPC of a CSV Session row the employee is explicitly re-editing (e.g. to
+// add a missing Expiration Date); ADD TO CSV checks this to UPDATE that
+// exact bulk row in place instead of hitting the normal duplicate-UPC
+// block. Cleared on a successful in-place update AND whenever a genuinely
+// NEW product is scanned (see `cur=res;` below), so an abandoned
+// return-to-fix flow can never silently retarget a different product.
+let _psReturnToFixUpc = null;
 let _psSellbriteProducts = {};
 let _lastBundleUrl = ''; // URL pública de ImgBB del último bundle generado
 
@@ -5330,6 +5338,9 @@ async function finishAnalyze(upc, prod, ebayFull, stepIn){
     applyVerdict(res);
 
     cur=res;
+    // Un escaneo real de OTRO producto invalida cualquier "Regresar y
+    // corregir" pendiente — nunca debe actualizar la fila equivocada.
+    _psReturnToFixUpc = null;
     cur._singleProductImg=null; // limpiar foto anterior al escanear nuevo producto
     cur._bundleImg=null;
     cur._titleManual=false; // el producto nuevo NO hereda edición manual del anterior
@@ -5783,7 +5794,16 @@ async function _addBulkInternal() {
   var expDate   = cur._expDate  || '';
   var location  = cur.location  || '';
 
-  if (bulk.find(function(b){ return b.upc === cur.upc; })) {
+  // 16 sep 2026 — el bloqueo de UPC duplicado se queda igual en el flujo
+  // normal. Pero cuando _psReturnToFixUpc está activo para ESTE upc exacto
+  // (el empleado volvió explícitamente a corregir una fila ya existente,
+  // p.ej. fecha de expiración faltante), _doAddBulk() debe ACTUALIZAR esa
+  // fila en su mismo índice en vez de rechazar el guardado. La decisión de
+  // "reemplazar en vez de rechazar" vive en _doAddBulk() (que resuelve el
+  // índice real al momento de guardar); aquí solo se deja pasar cuando
+  // corresponde, y el bloqueo normal sigue intacto para cualquier otro caso.
+  if (bulk.find(function(b){ return b.upc === cur.upc; }) &&
+      !(_psReturnToFixUpc && _psReturnToFixUpc === cur.upc)) {
     toast('⚠️ Already in CSV'); return;
   }
 
@@ -5836,8 +5856,25 @@ async function _addBulkInternal() {
 }
 
 async function _doAddBulk(usedTitle, usedSKU, usedPrice, shade, expDate, location, packs, photoUrl) {
+  // 16 sep 2026 — "Regresar y corregir": resolver el índice de reemplazo
+  // ANTES de tocar la foto. Se resuelve AQUÍ (no antes, no en el llamador)
+  // para nunca confiar en una posición capturada previamente. Una fila
+  // reconstruida por rehidratación (_psRehydrated) no trae _packImages, así
+  // que el chequeo "¿es foto de pack generado?" de abajo la daría por NO
+  // normalizada y la re-procesaría innecesariamente — con riesgo real de
+  // producir una URL solo visualmente idéntica, no la misma. Por eso ambas
+  // fotos y descripción se preservan tal cual para ese caso específico, sin
+  // pasar por el pipeline normal.
+  var _replaceIdx = (_psReturnToFixUpc && cur && cur.upc && cur.upc === _psReturnToFixUpc)
+    ? bulk.findIndex(function(b){ return b.upc === cur.upc; })
+    : -1;
+  var _rehydratedReplace = !!(cur && cur._psRehydrated && _replaceIdx !== -1);
+
+  if (_rehydratedReplace) {
+    photoUrl = bulk[_replaceIdx].photo || photoUrl;
+  }
   // Si hay foto, verificar si es de pack generado (ya normalizada) o si necesita normalización
-  if (photoUrl) {
+  if (photoUrl && !_rehydratedReplace) {
     // Detectar si la foto es de pack generado (ya 1200x1200)
     const packImgs = cur && cur._packImages && cur._packImages[packs];
     const packUrls = packImgs ?
@@ -5894,7 +5931,7 @@ async function _doAddBulk(usedTitle, usedSKU, usedPrice, shade, expDate, locatio
     }
   }
 
-  bulk.push({
+  var _newRow = {
     sku:         usedSKU,
     title:       usedTitle || (cur && cur.title) || '',
     price:       usedPrice,
@@ -5904,20 +5941,38 @@ async function _doAddBulk(usedTitle, usedSKU, usedPrice, shade, expDate, locatio
     upc:         (cur && cur.upc)         || '',
     brand:       (cur && cur.brand)       || 'Generic',
     category:    psSafeCategory(cur && cur.category),
-    description: descToEbayHTML(descForPack((cur && (cur._description || cur.description)) || '', packs, cur)) || '',
+    // Rehidratada + reemplazando: NO se regenera — descForPack() envolvería
+    // el HTML ya final de la fila con OTRO intro de bundle encima. Se
+    // conserva la descripción existente tal cual; lo único que cambió es lo
+    // que el empleado editó en el editor (p.ej. Expiration Date).
+    description: _rehydratedReplace
+      ? bulk[_replaceIdx].description
+      : (descToEbayHTML(descForPack((cur && (cur._description || cur.description)) || '', packs, cur)) || ''),
     location:    location,
     packs:       packs,
     photo:       photoUrl,
-    bundleImg:   photoUrl,
+    bundleImg:   _rehydratedReplace ? (bulk[_replaceIdx].bundleImg || photoUrl) : photoUrl,
     _specifics:  (cur && cur._specifics) || {},
     _formationStatus: (cur && cur._formationStatus) || null,
     _formationLocked: (cur && cur._formationLocked) || false,
     scannedBy:   SAVVY_CURRENT_USER || 'unknown'
-  });
+  };
+
+  // 16 sep 2026 — "Regresar y corregir": actualizar la fila existente EN SU
+  // LUGAR (mismo índice, mismo SKU/UPC) en vez de agregar una nueva. La
+  // longitud de `bulk` nunca cambia en este camino, y no se reordena nada.
+  var _updated = false;
+  if (_replaceIdx !== -1) {
+    bulk[_replaceIdx] = _newRow;
+    _updated = true;
+    _psReturnToFixUpc = null;
+  } else {
+    bulk.push(_newRow);
+  }
   saveBulkToStorage();
   updateFAB();
   // Mostrar confirmación clara de auto-save
-  var msg = '✅ Added — ' + bulk.length + ' in CSV (Auto-saved to device)';
+  var msg = (_updated ? '✅ Updated — ' : '✅ Added — ') + bulk.length + ' in CSV (Auto-saved to device)';
   toast(msg);
   console.log('PERSIST: ' + msg);
 }
@@ -9298,6 +9353,141 @@ async function validateCategoriesWithEbay(items) {
   return map;
 }
 
+// ============================================================================
+// "REGRESAR Y CORREGIR" — recuperación del export bloqueado por falta de
+// fecha de expiración (16 sep 2026)
+// ============================================================================
+// Antes: el export bloqueado usaba alert() (solo OK) y el empleado quedaba
+// en CSV Session sin forma segura de volver al producto — las únicas
+// acciones disponibles eran ✕ borrar la fila o Clear Session, ambas
+// destructivas. Esto reemplaza el alert() por un modal con dos botones:
+// "Cerrar" (solo cierra el aviso, no toca nada más) y "← Regresar y
+// corregir" (navega al editor del producto que falla, sin borrar su fila
+// ni la sesión, y actualiza esa misma fila al volver a ADD TO CSV).
+
+function psFindBulkIndexByUpc(upc) {
+  return bulk.findIndex(function(b){ return b.upc === upc; });
+}
+window.psFindBulkIndexByUpc = psFindBulkIndexByUpc;
+
+function psShowExpBlockedModal(noExpList) {
+  var existing = document.getElementById('expBlockOv');
+  if (existing) existing.remove();
+
+  var firstUpc = (noExpList[0] && noExpList[0].upc) || '';
+  var listHtml = noExpList.map(function(it){
+    return '<div style="font-family:monospace;font-size:13px;color:#fff;padding:2px 0">• ' + esc(it.sku || it.title || '?') + '</div>';
+  }).join('');
+
+  var ov = document.createElement('div');
+  ov.id = 'expBlockOv';
+  ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.88);z-index:99999;display:flex;align-items:center;justify-content:center;padding:24px';
+  ov.innerHTML = '<div style="background:#1a1a1a;border-radius:16px;padding:24px;width:100%;max-width:360px">'
+    + '<div style="font-size:18px;font-weight:800;color:#e74c3c;margin-bottom:10px">🚫 EXPORT DETENIDO</div>'
+    + '<div style="font-size:14px;color:#ddd;margin-bottom:8px">' + noExpList.length + ' producto(s) SIN fecha de expiración:</div>'
+    + '<div style="background:#111;border-radius:10px;padding:10px;margin-bottom:12px;max-height:160px;overflow-y:auto">' + listHtml + '</div>'
+    + '<div style="font-size:13px;color:#aaa;margin-bottom:20px">eBay RECHAZA estos listados (error 21919303).</div>'
+    + '<button id="expBlockReturnBtn" style="width:100%;background:linear-gradient(135deg,#00e676,#00a854);border:none;border-radius:12px;padding:14px;color:#000;font-size:15px;font-weight:800;cursor:pointer;margin-bottom:8px">← Regresar y corregir</button>'
+    + '<button id="expBlockCloseBtn" style="width:100%;background:none;border:1px solid #555;border-radius:12px;padding:12px;color:#aaa;font-size:14px;cursor:pointer">Cerrar</button>'
+    + '</div>';
+  document.body.appendChild(ov);
+
+  // "Cerrar" SOLO cierra este modal. No toca bulk, cur, CSV Session, ni
+  // navega a ningún lado — el empleado se queda exactamente donde estaba.
+  document.getElementById('expBlockCloseBtn').addEventListener('click', function(){
+    ov.remove();
+  });
+  document.getElementById('expBlockReturnBtn').addEventListener('click', function(){
+    ov.remove();
+    psReturnAndFixExpDate(firstUpc);
+  });
+}
+window.psShowExpBlockedModal = psShowExpBlockedModal;
+
+// "← Regresar y corregir" — navega de vuelta al producto que falla
+// validación de exportación (por defecto el primero: _noExp[0]) SIN borrar
+// su fila de CSV Session ni la sesión completa. El índice se resuelve AQUÍ,
+// en el momento del click — nunca desde una posición capturada antes, ya
+// que otra acción pudo haber cambiado el orden de `bulk` mientras tanto.
+function psReturnAndFixExpDate(targetUpc) {
+  var idx = psFindBulkIndexByUpc(targetUpc);
+  if (idx === -1) {
+    toast('⚠️ Ese producto ya no está en la sesión CSV');
+    return;
+  }
+  var row = bulk[idx];
+
+  // Cierra CSV Session con su propio mecanismo, no destructivo (solo oculta
+  // el overlay — no toca bulk ni cur). Ver closeBulk() más abajo.
+  if (typeof window.closeBulk === 'function') window.closeBulk();
+
+  if (cur && cur.upc && cur.upc === row.upc) {
+    // CASO cur VIGENTE — máxima fidelidad. No se reconstruye nada: es el
+    // mismo objeto vivo que se usó para agregar la fila, con specifics,
+    // datos canónicos, _countConfirmed, etc. todavía intactos.
+    _psReturnToFixUpc = row.upc;
+  } else {
+    // CASO cur SOBRESCRITO — se escaneó otro producto después de agregar
+    // esta fila (cur=res; en el flujo de escaneo reemplaza el objeto
+    // completo). Se reconstruye SOLO lo necesario desde la fila ya guardada
+    // para poder editar la fecha de expiración con seguridad. No se inventa
+    // ningún dato canónico/fuente que la fila no tenga — por eso NO se
+    // rellena _description (ver _doAddBulk: una fila rehidratada preserva
+    // la descripción existente tal cual en vez de regenerarla) ni
+    // _countConfirmed (si el producto es multipack, el gate de conteo
+    // existente puede volver a preguntar — comportamiento seguro conocido,
+    // no un intento fallido de adivinar el conteo).
+    cur = {
+      title: row.title,
+      _selectedTitle: row.title,
+      brand: row.brand,
+      upc: row.upc,
+      price: row.price,
+      _selectedPrice: row.price,
+      category: row.category,
+      categoryName: (typeof catNm === 'function') ? catNm(row.category) : '',
+      _selectedSKU: row.sku,
+      _selectedPack: row.packs,
+      packSize: row.packs,
+      location: row.location,
+      _specifics: row._specifics || {},
+      _bundleImg: row.bundleImg || row.photo || null,
+      _imgUrl: row.photo || null,
+      _shade: row.shade || '',
+      _mfgCode: row.mfgCode || '',
+      _expDate: row.expDate || '',
+      _formationStatus: row._formationStatus || null,
+      _formationLocked: row._formationLocked || false,
+      _canonicalProductName: row.title,
+      _titleManual: false,
+      // Bandera que _doAddBulk() usa para preservar foto/descripción tal
+      // cual en vez de regenerarlas desde un `cur` que no tiene el
+      // contexto completo del escaneo original.
+      _psRehydrated: true,
+      ebay: {}
+    };
+    _psReturnToFixUpc = row.upc;
+  }
+
+  try {
+    renderResult(cur);
+    screen('res');
+  } catch (e) {
+    console.error('psReturnAndFixExpDate render error:', e);
+  }
+
+  // Mismo patrón de resaltado/scroll ya usado en el gate de conteo/expiración
+  // de _addBulkInternal() (ver más abajo) — reutilizado tal cual.
+  var expBtn = document.getElementById('exp-toggle-btn');
+  if (expBtn) {
+    expBtn.style.borderColor = '#e74c3c';
+    expBtn.style.background = 'rgba(231,76,60,.15)';
+    expBtn.scrollIntoView({behavior:'smooth', block:'center'});
+  }
+  toast('📅 Agrega la fecha de expiración y toca ➕ ADD TO CSV para actualizar');
+}
+window.psReturnAndFixExpDate = psReturnAndFixExpDate;
+
 async function exportCSV(){
   try {
   if(!bulk.length){toast('⚠️ No products');return;}
@@ -9943,19 +10133,18 @@ async function exportCSV(){
     return window.psMayNeedExpDate(_fc, it.title);
   });
   if (_noExp.length) {
-    var _noExpList = _noExp.map(function(it){ return '• ' + (it.sku || it.title || '?'); }).join('\n');
     window._exportLock = false;
     if (expBtnEl) {
       expBtnEl.innerHTML = expBtnOldHTML;
       expBtnEl.style.opacity = '';
       expBtnEl.style.pointerEvents = '';
     }
-    alert(
-      '🚫 EXPORT DETENIDO\n\n' + _noExp.length + ' producto(s) SIN fecha de expiración:\n\n' +
-      _noExpList +
-      '\n\neBay RECHAZA estos listados (error 21919303).\n\n' +
-      'Abre cada uno, toca 📅 y agrega la fecha del envase. Después exporta otra vez.'
-    );
+    // 16 sep 2026 — reemplaza el alert() plano (solo OK) por un modal con
+    // "← Regresar y corregir": el empleado quedaba atrapado en CSV Session
+    // sin forma segura de volver a corregir el producto (las únicas
+    // acciones disponibles eran ✕ borrar fila o Clear Session — ambas
+    // destructivas). Ver psShowExpBlockedModal().
+    psShowExpBlockedModal(_noExp);
     toast('🚫 Export detenido — faltan ' + _noExp.length + ' fecha(s) de expiración');
     return;
   }
@@ -10416,7 +10605,12 @@ document.addEventListener('DOMContentLoaded',()=>{
   }
   function openBulk(){ ensureBulkOverlay(); renderBulk(); document.getElementById('bulkOv').style.display='flex'; }
   function closeBulk(){ var o=document.getElementById('bulkOv'); if(o) o.style.display='none'; }
-  // Functions are called locally via event listeners; no need for window exposure
+  // 16 sep 2026 — expuesta en window: psReturnAndFixExpDate() (fuera de este
+  // closure) la reutiliza tal cual para cerrar CSV Session de forma no
+  // destructiva al volver a corregir un producto. Sigue siendo la MISMA
+  // función, sin cambios de comportamiento.
+  window.closeBulk = closeBulk;
+  // openBulk sigue siendo local — solo se llama desde el FAB de abajo.
   var _fabEl = document.getElementById('fab');
   if (_fabEl) {
     _fabEl.addEventListener('touchend', function(e){ e.preventDefault(); openBulk(); });
