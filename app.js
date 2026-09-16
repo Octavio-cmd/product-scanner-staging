@@ -484,6 +484,18 @@ function makeSKU(brand,upc,packs,title){
 function catId(n){
   const t=(n||'').toLowerCase();
 
+  // ── IDENTIDAD DE JUGUETE: precede a TODAS las reglas de commodity ──
+  // 16 sep 2026. SQU-196566213036-2pk: "Squishmallows Peanuts Woodstock
+  // Cupid 8 Inch Plush Toy" caía en 14308 (Food & Beverages) porque
+  // "woodstocK CUPid" coincidía con el patrón de K-Cup de café, mucho antes
+  // de llegar a las reglas de juguete (que además vivían más abajo). Un
+  // "Peanuts" (franquicia de Snoopy) o un "Cupid" no son subcadenas
+  // accidentales — son la palabra real del título — así que ni anclar por
+  // límite de palabra los habría evitado. La única defensa real es que la
+  // identidad de juguete gane SIEMPRE antes de que el bloque de comida
+  // pueda evaluarse.
+  if(/\bplush(ie)?\b|\bstuffed animal\b|\bsquishmallows?\b|\baction figure\b|\bfigure\b|\bdoll\b|\bplushy\b/i.test(t))return'220';
+
   // ── MASSAGERS / MASSAGE DEVICES (leaf: 36449 = Body Massagers) ──
   if(/massager|deep.tissue massag|percussion massag|massage gun|theragun|hypervolt|homedics|shiatsu|foot spa|foot massag|neck massag|back massag|scalp massag/i.test(t))return'36449';
   if(/sharper image.*(massag|deep.tissue|percussion|swappable head)/i.test(t))return'36449';
@@ -539,23 +551,23 @@ function catId(n){
   if(/toilet paper|charmin|cottonelle|scott tissue|angel soft/i.test(t))return'20625';
   if(/tissue|kleenex|puffs|facial tissue/i.test(t))return'20625';
   if(/trash bag|garbage bag|hefty|glad bag|ziploc|plastic wrap|aluminum foil|sandwich bag/i.test(t))return'20625';
-  if(/sponge|scrub brush|mop|broom|dustpan|rubber glove|cleaning glove/i.test(t))return'20625';
-  if(/candle|yankee candle|bath.body candle|wax melt|diffuser/i.test(t))return'20625';
+  if(/sponge|scrub brush|\bmop\b|\bbrooms?\b|dustpan|rubber glove|cleaning glove/i.test(t))return'20625';
+  if(/\bcandles?\b|yankee candle|bath.body candle|wax melt|diffuser/i.test(t))return'20625';
   if(/laundry|bleach|disinfectant|cleaner|cleaning|polish|degreaser/i.test(t))return'20625';
 
   // ── FOOD & BEVERAGES ─────────────────────────────────────────
-  if(/k.cup|keurig pod|nescafe|folgers|starbucks coffee|maxwell house|dunkin coffee|coffee pod/i.test(t))return'14308';
+  if(/\bk[-\s]?cups?\b|keurig pod|nescafe|folgers|starbucks coffee|maxwell house|dunkin coffee|coffee pod/i.test(t))return'14308';
   if(/coffee|espresso|cold brew/i.test(t))return'14308';
   if(/tea bag|green tea|herbal tea|lipton|bigelow|celestial seasonings|chamomile|sleepytime/i.test(t))return'14308';
   if(/monster|red bull|5.hour energy|bang energy|celsius drink|rockstar energy|reign energy/i.test(t))return'14308';
   if(/gatorade|powerade|liquid iv|pedialyte|nuun|electrolyte|sports drink/i.test(t))return'14308';
   if(/protein bar|kind bar|clif bar|larabar|rxbar|quest bar|fiber bar|nature valley|nutri.grain/i.test(t))return'14308';
-  if(/snack|popcorn|chip|pretzel|granola|trail mix|mixed nut|peanut|cashew|almond|sunflower seed/i.test(t))return'14308';
+  if(/\bsnacks?\b|popcorn|\bchips?\b|pretzel|granola|trail mix|mixed nut|\bpeanuts?\b|cashew|almond|sunflower seed/i.test(t))return'14308';
   if(/candy|chocolate|sour patch|skittles|m&m|reese|hershey|starburst|haribo/i.test(t))return'14308';
   if(/breath mint|tic tac|altoid|trident gum|orbit gum|extra gum|chewing gum/i.test(t))return'14308';
   if(/sauce|ketchup|mustard|mayo|mayonnaise|salad dressing|ranch|hot sauce|sriracha|tabasco|buffalo sauce/i.test(t))return'14308';
   if(/cereal|oatmeal|quaker oat|cream of wheat|breakfast bar|pop tart/i.test(t))return'14308';
-  if(/soup|broth|ramen|instant noodle|cup noodle|bouillon/i.test(t))return'14308';
+  if(/\bsoup\b|broth|ramen|instant noodle|cup noodle|bouillon/i.test(t))return'14308';
   if(/seasoning|spice|garlic powder|onion powder|cumin|paprika|chili powder|mrs.dash/i.test(t))return'14308';
 
   // ── CLEANING / HOME ──────────────────────────────────────────
@@ -568,8 +580,8 @@ function catId(n){
   if(/toilet paper|charmin|cottonelle|scott tissue|angel soft/i.test(t))return'20625';
   if(/tissue|kleenex|puffs|facial tissue/i.test(t))return'20625';
   if(/trash bag|garbage bag|hefty|glad bag|ziploc|plastic wrap|aluminum foil|sandwich bag/i.test(t))return'20625';
-  if(/sponge|scrub brush|mop|broom|dustpan|rubber glove|cleaning glove/i.test(t))return'20625';
-  if(/candle|yankee candle|bath.body candle|wax melt|diffuser/i.test(t))return'20625';
+  if(/sponge|scrub brush|\bmop\b|\bbrooms?\b|dustpan|rubber glove|cleaning glove/i.test(t))return'20625';
+  if(/\bcandles?\b|yankee candle|bath.body candle|wax melt|diffuser/i.test(t))return'20625';
   if(/detergent|laundry|bleach|disinfect|disinfectant/i.test(t))return'20625';
 
   // ── ELECTRONICS ──────────────────────────────────────────────
@@ -582,7 +594,7 @@ function catId(n){
   if(/bluetooth speaker|portable speaker|wireless speaker|jbl|bose speaker/i.test(t))return'14969';
   if(/phone case|iphone case|samsung case|screen protector|tempered glass|tablet case|ipad case/i.test(t))return'9394';
   if(/led bulb|smart bulb|light bulb|cfl bulb|light strip|led strip/i.test(t))return'48619';
-  if(/battery|batteries|charger|cable|usb|bluetooth/i.test(t))return'293';
+  if(/battery|batteries|charger|cable|\busb\b|bluetooth/i.test(t))return'293';
 
   // ── AUTOMOTIVE ───────────────────────────────────────────────
   if(/castrol|mobil.1|pennzoil|valvoline|quaker state|motor oil|engine oil|synthetic oil/i.test(t))return'6000';
@@ -609,9 +621,9 @@ function catId(n){
   if(/grill|barbecue|bbq/i.test(t))return'26677';
 
   // ── KITCHEN / HOME ────────────────────────────────────────────
-  if(/mug|cup|tumbler|travel mug|coffee mug|ceramic mug|mason jar/i.test(t))return'20695';
+  if(/\bmugs?\b|\bcups?\b|tumbler|travel mug|coffee mug|ceramic mug|mason jar/i.test(t))return'20695';
   if(/knife|knives|santoku|chef knife|paring knife|bread knife|steak knife/i.test(t))return'177005';
-  if(/pan|pot|skillet|wok|dutch oven|casserole|bakeware|cookware/i.test(t))return'20654';
+  if(/\bpans?\b|\bpots?\b|skillet|wok|dutch oven|casserole|bakeware|cookware/i.test(t))return'20654';
   if(/blender|mixer|toaster|air fryer|instant pot|slow cooker|pressure cooker|coffee maker|juicer/i.test(t))return'168763';
   if(/plate|bowl|dish|platter|serving|dinnerware|flatware|silverware/i.test(t))return'20650';
 
@@ -9429,11 +9441,61 @@ async function exportCSV(){
   };
 
   // ── Detectar el Type — TÍTULO PRIMERO (más confiable), luego categoría ──
+  // ── GUARDA DE PLAUSIBILIDAD: última defensa antes de exportar ────────
+  // 16 sep 2026. catId() y detectType() ya llevan precedencia de identidad,
+  // pero esto es la red de seguridad final: si el Type detectado pertenece
+  // a una familia (comida/bebida, belleza tópica) incompatible con la
+  // categoría REAL de la fila (_finalCat, no it.category crudo) o con
+  // evidencia de forma ingerible en el propio título, se rechaza y se usa
+  // 'Other' — nunca inventamos un Type nuevo, solo evitamos publicar uno
+  // que ya sabemos que está mal. Cubre cualquier regla futura que
+  // reintroduzca la misma clase de defecto.
+  var PS_FOOD_TYPES = ['Coffee','Tea','Energy Drink','Sports Drink','Snack Bar','Candy',
+    'Gum & Mints','Snack','Condiment','Breakfast Food','Soup','Seasoning'];
+  var PS_TOPICAL_BEAUTY_TYPES = ['Face Cream','Body Lotion','Lotion','Serum'];
+  function psTypeCategoryPlausible(finalCat, typeVal, title) {
+    if (!typeVal) return true;
+    var cat = String(finalCat || '');
+    var t = String(title || '').toLowerCase();
+    // Comida/bebida exportado sobre una fila cuya categoría real es juguetes.
+    if (PS_FOOD_TYPES.indexOf(typeVal) !== -1 &&
+        typeof PS_TOY_CATS !== 'undefined' && PS_TOY_CATS.indexOf(cat) !== -1) return false;
+    // Belleza tópica exportada cuando el propio título trae evidencia de
+    // forma ingerible (cápsula/tableta/softgel) — misma guarda que dentro
+    // de detectType(), por si alguna otra ruta la sortea.
+    if (PS_TOPICAL_BEAUTY_TYPES.indexOf(typeVal) !== -1 &&
+        /softgel|soft gel|capsule|tablet|caplet|gumm(y|ies)/i.test(t)) return false;
+    return true;
+  }
+
   // El título describe el producto exacto; la categoría a veces cae al
   // default (Skin Care) y no refleja lo que realmente es. Por eso revisamos
   // el título primero, en orden de más específico a más general.
   function detectType(category, title) {
     var t = (title || '').toLowerCase();
+
+    // ── IDENTIDAD DE JUGUETE: precede a TODAS las reglas de commodity ──
+    // 16 sep 2026. Mismo defecto que en catId(): "Squishmallows Peanuts
+    // Woodstock Cupid 8 Inch Plush Toy" coincidía con el patrón de K-Cup de
+    // café antes de llegar a cualquier noción de juguete. catId() y
+    // detectType() son funciones independientes — arreglar una no arregla
+    // la otra — así que la misma guarda de identidad va en ambas.
+    if(/\bplush(ie)?\b|\bstuffed animal\b|\bsquishmallows?\b|\baction figure\b|\bfigure\b|\bdoll\b|\bplushy\b/i.test(t)) {
+      if(/plushie|\bplush\b|\bplushy\b|stuffed animal|squishmallow/i.test(t)) return 'Plushie';
+      if(/action figure|\bfigure\b/i.test(t)) return 'Action Figure';
+      if(/\bdoll\b/i.test(t)) return 'Doll';
+      return 'Toy';
+    }
+
+    // ── FORMA INGERIBLE: se calcula ANTES del bloque tópico ──────────
+    // 16 sep 2026. Esta guarda ya existía más abajo (ver "SUPLEMENTOS Y
+    // MEDICINA"), pero corría DESPUÉS de todo el bloque de belleza tópica,
+    // así que nunca lo protegía. SeroVital "... Anti-Aging Renewal Complex
+    // 160 Capsules" caía en 'Face Cream' por "anti.aging" antes de que el
+    // código llegara a ver "capsules". Un suplemento en cápsulas no dice
+    // "cream"/"lotion"/"serum" porque el marketing hable de antienvejecimiento
+    // — ese lenguaje describe el efecto, no la forma del producto.
+    var _hasIngestibleForm = /softgel|soft gel|capsule|tablet|caplet|gumm(y|ies)|\d+\s?mcg|\d+\s?mg\b|\bdrops?\b|liquid supplement/.test(t);
 
     // ── HEALTH & BEAUTY — específicos primero ──────────────────────
     // Roll-ons y analgésicos tópicos (Absorbine, Bengay, Icy Hot, Biofreeze)
@@ -9443,17 +9505,21 @@ async function exportCSV(){
     if(/incontinence|adult diaper|depend|poise|tena|bladder/.test(t)) return 'Adult Diaper';
     // Air fresheners / aromatizantes / repuestos
     if(/air freshener|air wick|febreze|glade|scented oil|plug.?in refill|room spray|odor eliminat|wax melt|scentsy|renuzit/.test(t)) return 'Air Freshener';
-    if(/candle|yankee candle|wax warmer/.test(t)) return 'Candle';
+    if(/\bcandles?\b|yankee candle|wax warmer/.test(t)) return 'Candle';
     // Cuidado de piel
     if(/lip balm|chapstick|lip butter|carmex|blistex/.test(t)) return 'Lip Balm';
     if(/body wash|shower gel|bath gel|body cleanser/.test(t)) return 'Body Wash';
     if(/bar soap|hand soap|liquid soap|antibacterial soap|castile soap/.test(t)) return 'Soap';
     if(/sunscreen|sunblock|\bspf\b|sun protection|after sun/.test(t)) return 'Sunscreen';
-    if(/face cream|facial cream|face moisturizer|facial moisturizer|anti.aging|wrinkle cream|night cream|day cream|eye cream/.test(t)) return 'Face Cream';
-    if(/body lotion|hand lotion|body cream|hand cream|body butter|moisturizing lotion|daily moisturizer/.test(t)) return 'Body Lotion';
+    // 16 sep 2026 — !_hasIngestibleForm: "anti-aging"/"serum"/"hyaluronic"/
+    // "niacinamide" describen el EFECTO de marketing, no la forma del
+    // producto — un suplemento en cápsulas puede usar ese lenguaje sin ser
+    // una crema. Ver SeroVital "...Anti-Aging Renewal Complex 160 Capsules".
+    if(!_hasIngestibleForm && /face cream|facial cream|face moisturizer|facial moisturizer|anti.aging|wrinkle cream|night cream|day cream|eye cream/.test(t)) return 'Face Cream';
+    if(!_hasIngestibleForm && /body lotion|hand lotion|body cream|hand cream|body butter|moisturizing lotion|daily moisturizer/.test(t)) return 'Body Lotion';
     if(/face wash|facial cleanser|face scrub|cleanser/.test(t)) return 'Face Wash';
-    if(/serum|toner|retinol serum|hyaluronic|niacinamide/.test(t)) return 'Serum';
-    if(/\blotion|moisturizer|moisturis/.test(t)) return 'Lotion';
+    if(!_hasIngestibleForm && /serum|toner|retinol serum|hyaluronic|niacinamide/.test(t)) return 'Serum';
+    if(!_hasIngestibleForm && /\blotion|moisturizer|moisturis/.test(t)) return 'Lotion';
     // Cabello
     if(/shampoo/.test(t)) return 'Shampoo';
     if(/conditioner/.test(t)) return 'Conditioner';
@@ -9503,7 +9569,8 @@ async function exportCSV(){
     // suplemento — así no perdemos "fish oil 1000mg softgels" (sí es
     // suplemento) ni confundimos "biotin oil" para cabello (no lo es).
     var _hasTopicalForm = /\b(oil|cream|lotion|serum|spray|shampoo|conditioner|mist|gel|mask|leave-?in|treatment)\b/.test(t);
-    var _hasIngestibleForm = /softgel|soft gel|capsule|tablet|caplet|gumm(y|ies)|\d+\s?mcg|\d+\s?mg\b|\bdrops?\b|liquid supplement/.test(t);
+    // _hasIngestibleForm ya se calculó al principio de la función (16 sep
+    // 2026, guarda de belleza tópica) — se reutiliza en vez de recalcularla.
     var _hasAmbiguousIngredient = /\bbiotin\b|\bcollagen\b|omega.?3/.test(t);
     if(!(_hasAmbiguousIngredient && _hasTopicalForm && !_hasIngestibleForm) &&
        /probiotic|omega.?3|fish oil|collagen|biotin|melatonin|turmeric|elderberry|ashwagandha|magnesium|zinc supplement|calcium supplement|iron supplement|coq10/.test(t)) return 'Supplement';
@@ -9543,20 +9610,20 @@ async function exportCSV(){
     if(/facial tissue|kleenex|puffs/.test(t)) return 'Facial Tissue';
     if(/trash bag|garbage bag|hefty|glad bag/.test(t)) return 'Trash Bag';
     if(/plastic wrap|aluminum foil|sandwich bag|ziploc|storage bag/.test(t)) return 'Food Storage';
-    if(/sponge|scrub brush|mop|broom|dustpan/.test(t)) return 'Cleaning Tool';
+    if(/sponge|scrub brush|\bmop\b|\bbrooms?\b|dustpan/.test(t)) return 'Cleaning Tool';
 
     // ── COMIDA Y BEBIDA ────────────────────────────────────────────
-    if(/coffee|espresso|k.?cup|coffee pod|cold brew/.test(t)) return 'Coffee';
+    if(/coffee|espresso|\bk[-\s]?cups?\b|coffee pod|cold brew/.test(t)) return 'Coffee';
     if(/tea bag|green tea|herbal tea/.test(t)) return 'Tea';
     if(/energy drink|monster|red bull|5.hour energy|bang energy/.test(t)) return 'Energy Drink';
     if(/sports drink|gatorade|powerade|electrolyte|pedialyte/.test(t)) return 'Sports Drink';
     if(/protein bar|kind bar|clif bar|granola bar|nutri.grain/.test(t)) return 'Snack Bar';
     if(/candy|chocolate|gummy candy|skittles|m&m|reese|hershey/.test(t)) return 'Candy';
     if(/chewing gum|breath mint|tic tac|altoid|trident|orbit gum/.test(t)) return 'Gum & Mints';
-    if(/chip|popcorn|pretzel|trail mix|nut snack|cracker/.test(t)) return 'Snack';
+    if(/\bchips?\b|popcorn|pretzel|trail mix|nut snack|cracker/.test(t)) return 'Snack';
     if(/sauce|ketchup|mustard|mayonnaise|salad dressing|hot sauce/.test(t)) return 'Condiment';
     if(/cereal|oatmeal|granola|breakfast/.test(t)) return 'Breakfast Food';
-    if(/soup|broth|ramen|instant noodle|bouillon/.test(t)) return 'Soup';
+    if(/\bsoup\b|broth|ramen|instant noodle|bouillon/.test(t)) return 'Soup';
     if(/seasoning|spice|garlic powder|paprika|cumin/.test(t)) return 'Seasoning';
 
     // ── ELECTRÓNICOS ───────────────────────────────────────────────
@@ -9938,6 +10005,9 @@ async function exportCSV(){
 
     var pics = it.bundleImg || it.photo || it.imgUrl || '';
     var typeVal   = detectType(String(it.category), it.title);
+    if (!psTypeCategoryPlausible(_finalCat, typeVal, it.title)) {
+      typeVal = 'Other';
+    }
     var epaVal    = getEpaNumber(String(it.category), it.title);
     var modelVal  = '';
     var colorVal  = '';
