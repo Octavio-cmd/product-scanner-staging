@@ -9094,7 +9094,12 @@ function descForPack(desc, packs, curObj) {
   var _countPhrase = '';
   if (typeof psGetCanonicalUnitCount === 'function') {
     var _unitCount = psGetCanonicalUnitCount(curObj);
-    if (_unitCount) {
+    // 16 sep 2026 — unitCount === 1 means each unit is a single,
+    // indivisible item (e.g. one Squishmallows plush). "This bundle
+    // includes N individual units" (built separately below from `packs`,
+    // untouched by this guard) already states the complete quantity;
+    // "1 count each, N total" adds nothing and reads as redundant noise.
+    if (_unitCount && _unitCount > 1) {
       var _totalCount = _unitCount * packs;
       var _noun = (typeof psGetUnitNoun === 'function') ? psGetUnitNoun(curObj) : null;
       if (_noun) {

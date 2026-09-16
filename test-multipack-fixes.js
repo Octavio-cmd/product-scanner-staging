@@ -371,7 +371,16 @@ function gCur(canon) {
   };
 }
 
-check('G-A Size "100"',                fx.psGetCanonicalUnitCount(gCur({ Size: '100' })), 100);
+// 16 sep 2026 — bare-integer policy tightened (Squishmallows "8 Inch" ->
+// unitCount 8 fix). 'Size' is a shared, ambiguous eBay column (real counts
+// like "25 Count" live there, but so do physical dimensions like "8 Inch",
+// and legacy bare values like "100" with no proof either way), so a bare
+// integer under 'Size' alone is no longer trusted — it fails safe to null
+// and lets the count gate ask a human. 'Count' / 'Unit Quantity' are
+// explicitly count-semantic field NAMES, so a bare integer there is still
+// trusted. See psScanSpecificsForCount() in multipack-fixes.js.
+check('G-A Size "100" alone -> null (ambiguous field, no proof)',
+      fx.psGetCanonicalUnitCount(gCur({ Size: '100' })), null);
 check('G-B Count "100"',               fx.psGetCanonicalUnitCount(gCur({ Count: '100' })), 100);
 check('G-C Unit Quantity "100"',       fx.psGetCanonicalUnitCount(gCur({ 'Unit Quantity': '100' })), 100);
 check('G-D Size "100 Count"',          fx.psGetCanonicalUnitCount(gCur({ Size: '100 Count' })), 100);
@@ -384,8 +393,10 @@ check('G-G Size "4.76 oz" + Count "100" -> 100',
 // A measurement alone must never be mistaken for a count.
 check('G-H Size "4.76 oz" alone -> null',
       fx.psGetCanonicalUnitCount(gCur({ Size: '4.76 oz' })), null);
-check('G-I field order: Size wins over Count',
-      fx.psGetCanonicalUnitCount(gCur({ Size: '50', Count: '100' })), 50);
+// A bare "50" under the ambiguous 'Size' field is no longer proof of a
+// count, so the scan correctly falls through to the trusted 'Count' field.
+check('G-I field order: bare Size no longer trusted, Count wins',
+      fx.psGetCanonicalUnitCount(gCur({ Size: '50', Count: '100' })), 100);
 // Contaminated first field must not block a clean later one.
 check('G-J Size "300 Total" + Count "100" -> 100',
       fx.psGetCanonicalUnitCount(gCur({ Size: '300 Total', Count: '100' })), 100);

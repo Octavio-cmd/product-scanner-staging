@@ -60,25 +60,76 @@ function psNormalizeUnitToken(unit) {
 // so the per-unit count can legitimately live in any of them.
 var PS_COUNT_FIELDS = ['Size', 'Count', 'Unit Quantity'];
 
+// ── SHARED COUNT VOCABULARY ─────────────────────────────────────────────
+// 16 sep 2026. UPC 196566213036 (Squishmallows Peanuts Woodstock Cupid 8
+// Inch Plush Toy) exported "8 Inch" as a per-unit COUNT — 2pk became 16
+// Total, 3pk 24 Total, etc. Size = "8 Inch" is a real, correct physical
+// dimension; the bug was that a leading integer ALONE was ever accepted as
+// count evidence, with no check on what followed it. A discrete-item noun
+// ("25 Count", "100 Pieces") is real count evidence; a measurement unit
+// ("8 Inch", "12 oz", "500 ml") never is, no matter how plausible the
+// number looks.
+//
+// Centralizes what used to be a noun list duplicated inline inside
+// psGetCanonicalUnitCount() (COUNT_NOUNS) and, separately, PS_COUNT_UNITS
+// in app.js (used by psDetectCount() to scan raw titles — a different,
+// already-proven code path, left untouched). Every new count decision in
+// THIS file reads from here.
+var PS_COUNT_NOUN_RE_SRC =
+  '(?:count|ct|tablets?|tabs?|capsules?|caps?|soft\\s?gels?|gumm(?:y|ies)|' +
+  'pellets?|strips?|pads?|packets?|pieces?|pcs|pills?|lozenges?|sachets?|' +
+  'wipes?|patches?|bandages?|tests?|treatments?|doses?|servings?|bags?)';
+
+// Physical measurements — "N <unit>" is a dimension/weight/volume, NEVER a
+// per-unit count.
+var PS_MEASURE_UNIT_RE_SRC =
+  '(?:inch(?:es)?|in|fl\\.?\\s?oz|floz|fluid\\s?ounces?|oz|ounces?|ml|' +
+  'liters?|litres?|l|lbs?|pounds?|kg|kilograms?|grams?|gm|g|' +
+  'cm|centimeters?|mm|millimeters?|ft|feet|foot|yd|yards?|' +
+  'gal|gallons?|qt|quarts?|pt|pints?)';
+
+var PS_COUNT_NOUN_RE = new RegExp('^' + PS_COUNT_NOUN_RE_SRC + '\\b', 'i');
+var PS_MEASURE_UNIT_RE = new RegExp('^' + PS_MEASURE_UNIT_RE_SRC + '\\b', 'i');
+
 // Reads a per-unit count out of a specifics bag under strict rules:
 //   - a value carrying a standalone "Total" is a bundle figure, never a fact
-//   - only a WHOLE leading integer token counts. "(\d+)" alone would read
-//     "4.76 oz" as 4, so a measurement must fall through to the next field
-//     instead of poisoning the count
+//   - a leading integer is NOT sufficient by itself. What follows it decides:
+//       · a recognized count noun ("Count", "Pieces", "Tablets"...)  -> accept
+//       · a recognized physical-measurement unit ("Inch", "oz", "ml"...) -> reject
+//         this field outright and keep scanning the others; the field is not
+//         reinterpreted as ambiguous — it is proven NOT a count
+//       · a bare integer with nothing after it -> only trusted when the FIELD
+//         ITSELF is explicitly count-semantic ('Count' / 'Unit Quantity').
+//         'Size' is a shared, ambiguous column (real per-unit counts like
+//         "25 Count" live there, but so do physical dimensions like "8 Inch"
+//         or a bare legacy "100" from an older AI/specifics path with no
+//         proof either way) — a bare number there is NOT accepted; fail
+//         safe and let the count gate ask a human instead of guessing.
+//       · anything else unrecognized -> ambiguous, fail safe, do not guess
 //   - range 1..9999
 // Returns null when nothing qualifies. Never guesses.
 function psScanSpecificsForCount(specs) {
   if (!specs) return null;
   for (var i = 0; i < PS_COUNT_FIELDS.length; i++) {
-    var raw = specs[PS_COUNT_FIELDS[i]];
+    var field = PS_COUNT_FIELDS[i];
+    var raw = specs[field];
     if (!raw) continue;
     var val = String(raw).trim();
     if (/\bTotals?\b/i.test(val)) continue;
-    var m = val.match(/^(\d{1,4})(?:\s|$)/);
-    if (m) {
-      var num = parseInt(m[1], 10);
-      if (num > 0 && num < 10000) return num;
+
+    var m = val.match(/^(\d{1,4})\s*(.*)$/);
+    if (!m) continue;
+    var num = parseInt(m[1], 10);
+    if (!(num > 0 && num < 10000)) continue;
+    var rest = m[2].trim();
+
+    if (!rest) {
+      if (field === 'Count' || field === 'Unit Quantity') return num;
+      continue;   // bare integer under 'Size' — no proof, fail safe
     }
+    if (PS_COUNT_NOUN_RE.test(rest)) return num;
+    if (PS_MEASURE_UNIT_RE.test(rest)) continue;   // proven measurement, not a count
+    // unrecognized trailing word — ambiguous, fail safe
   }
   return null;
 }
@@ -132,7 +183,9 @@ function psGetCanonicalUnitCount(cur) {
   var currentCount = psScanSpecificsForCount(cur._specifics);
   if (currentCount) return currentCount;
 
-  var COUNT_NOUNS = '(?:Count|Ct|Tablets?|Capsules?|Softgels?|Soft\\s?Gels?|Pellets?|Gumm(?:y|ies)|Strips?|Pads?|Packets?|Pieces?)';
+  // Centralized vocabulary (see PS_COUNT_NOUN_RE_SRC above) — single source
+  // of truth for what counts as a discrete-item count noun.
+  var COUNT_NOUNS = PS_COUNT_NOUN_RE_SRC;
 
   if (cur._canonicalProductName) {
     var canonical = String(cur._canonicalProductName);
@@ -390,7 +443,14 @@ function psFitTitleSemantic(baseText, optionalSegments, protectedTail, maxLen) {
 // so descriptors yield to the bundle total, and the brand yields to nothing.
 function psBuildCountSegments(cur, packSize, baseText) {
   var unitCount = psGetCanonicalUnitCount(cur);
-  if (!unitCount) return [];
+  // 16 sep 2026 — unitCount === 1 means each unit is a single, indivisible
+  // item (e.g. one Squishmallows plush). "Pack of N" already states the
+  // complete bundle quantity in that case; "1 Each" / "N Total" (== N,
+  // identical to the pack size) adds no information and just reads as
+  // redundant noise ("Pack of 3 New" is correct; "3 Total Pack of 3 New"
+  // is not). Real multi-piece-per-unit products (25 Count, 100 Pieces)
+  // keep full segments — this only suppresses the degenerate 1x case.
+  if (!unitCount || unitCount === 1) return [];
   var noun = psGetUnitNoun(cur);
   var totalCount = (Number(packSize) > 0) ? unitCount * Number(packSize) : null;
 
@@ -508,7 +568,10 @@ function descForPackFixed(desc, packs, curObj) {
 
   if (productName) bundleIntro += ' of ' + productName;
 
-  if (unitCount) {
+  // unitCount === 1 -> single indivisible item per unit; "N individual
+  // units" (above) already says everything there is to say. See the same
+  // guard + rationale in psBuildCountSegments().
+  if (unitCount && unitCount > 1) {
     if (noun) {
       bundleIntro += ', ' + unitCount + ' ' + psPluralizeUnitNoun(noun, unitCount) + ' each';
       if (totalCount && packs > 1) {
