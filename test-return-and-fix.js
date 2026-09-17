@@ -333,16 +333,23 @@ section('G/H/I/J — _doAddBulk() updates the existing row IN PLACE');
   // K — normal duplicate guard is unchanged OUTSIDE fix mode
   // ─────────────────────────────────────────────────────────────────────
   section('K — normal duplicate-UPC guard unchanged outside "Regresar y corregir"');
-  const guardMatch = appSrc.match(/if \(bulk\.find\(function\(b\)\{ return b\.upc === cur\.upc; \}\) &&\s*\n\s*!\(_psReturnToFixUpc && _psReturnToFixUpc === cur\.upc\)\) \{\s*\n\s*toast\('⚠️ Already in CSV'\); return;\s*\n\s*\}/);
-  checkTrue('duplicate guard source matches the expected fix-mode-aware condition', !!guardMatch, 'regex did not match — guard text may have changed');
+  // 17 sep 2026 — Investigación #6 extended this guard to also require an
+  // exact SKU match when _psReturnToFixSku is present (multi-pack-per-UPC
+  // safety) — see app.js:5831-5834. Updated here to match intentionally.
+  const guardMatch = appSrc.match(/var _rtfMatchesThisUpc = _psReturnToFixUpc && _psReturnToFixUpc === cur\.upc;\s*\n\s*var _rtfMatchesThisSku = _rtfMatchesThisUpc && \(!_psReturnToFixSku \|\| _psReturnToFixSku === usedSKU\);\s*\n\s*if \(bulk\.find\(function\(b\)\{ return b\.upc === cur\.upc; \}\) && !_rtfMatchesThisSku\) \{\s*\n\s*toast\('⚠️ Already in CSV'\); return;\s*\n\s*\}/);
+  checkTrue('duplicate guard source matches the expected fix-mode-aware, SKU-aware condition', !!guardMatch, 'regex did not match — guard text may have changed');
   // Logic-level cross-check of the same condition with representative inputs.
-  function guardBlocks(dupExists, fixUpc, curUpc) {
-    return dupExists && !(fixUpc && fixUpc === curUpc);
+  function guardBlocks(dupExists, fixUpc, curUpc, fixSku, usedSku) {
+    var rtfMatchesUpc = fixUpc && fixUpc === curUpc;
+    var rtfMatchesSku = rtfMatchesUpc && (!fixSku || fixSku === usedSku);
+    return dupExists && !rtfMatchesSku;
   }
-  checkTrue('K1: duplicate exists, no fix-mode -> blocked (normal behavior unchanged)', guardBlocks(true, null, 'X') === true);
-  checkTrue('K2: duplicate exists, fix-mode for THIS upc -> allowed through', guardBlocks(true, 'X', 'X') === false);
-  checkTrue('K3: duplicate exists, fix-mode for a DIFFERENT upc -> still blocked', guardBlocks(true, 'Y', 'X') === true);
-  checkTrue('K4: no duplicate -> never blocked, regardless of fix-mode', guardBlocks(false, 'X', 'X') === false && guardBlocks(false, null, 'X') === false);
+  checkTrue('K1: duplicate exists, no fix-mode -> blocked (normal behavior unchanged)', guardBlocks(true, null, 'X', null, 'sku') === true);
+  checkTrue('K2: duplicate exists, fix-mode for THIS upc, no sku target -> allowed through', guardBlocks(true, 'X', 'X', null, 'sku') === false);
+  checkTrue('K3: duplicate exists, fix-mode for a DIFFERENT upc -> still blocked', guardBlocks(true, 'Y', 'X', null, 'sku') === true);
+  checkTrue('K4: no duplicate -> never blocked, regardless of fix-mode', guardBlocks(false, 'X', 'X', null, 'sku') === false && guardBlocks(false, null, 'X', null, 'sku') === false);
+  checkTrue('K5: duplicate exists, fix-mode for THIS upc AND exact sku match -> allowed through', guardBlocks(true, 'X', 'X', 'SKU-3pk', 'SKU-3pk') === false);
+  checkTrue('K6: duplicate exists, fix-mode for THIS upc but a DIFFERENT sibling sku -> still blocked (multi-pack safety)', guardBlocks(true, 'X', 'X', 'SKU-3pk', 'SKU-2pk') === true);
 
   // ─────────────────────────────────────────────────────────────────────
   // L — multiple failing rows: fix ONE at a time, sequential

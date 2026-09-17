@@ -441,6 +441,15 @@ let bulk=[],cur=null;
 // NEW product is scanned (see `cur=res;` below), so an abandoned
 // return-to-fix flow can never silently retarget a different product.
 let _psReturnToFixUpc = null;
+// 17 sep 2026 — Investigación #6. UPC solo no basta: el mismo UPC puede
+// tener varias filas en bulk (SER-UPC-2pk, SER-UPC-3pk, SER-UPC-6pk vía
+// Bulk Split). _psReturnToFixSku identifica la fila EXACTA que se está
+// corrigiendo — la fila que EXPORT DETENIDO señaló es la fuente de verdad
+// de esta identidad, no algo que se vuelva a inferir de cur más tarde.
+// Cuando está presente, toda lógica de reemplazo debe exigir coincidencia
+// de SKU exacto, no solo de UPC — así una corrección a la fila de 3pk
+// nunca toca las filas de 2pk/6pk que comparten el mismo UPC.
+let _psReturnToFixSku = null;
 // 16 sep 2026 — Investigación #4. true SOLO mientras renderResult() corre
 // como parte de "Regresar y corregir": le dice a renderResult() que NO
 // resetee window._splitActive/_splitManual a sus valores por defecto ni
@@ -5350,6 +5359,7 @@ async function finishAnalyze(upc, prod, ebayFull, stepIn){
     // Un escaneo real de OTRO producto invalida cualquier "Regresar y
     // corregir" pendiente — nunca debe actualizar la fila equivocada.
     _psReturnToFixUpc = null;
+    _psReturnToFixSku = null;
     cur._singleProductImg=null; // limpiar foto anterior al escanear nuevo producto
     cur._bundleImg=null;
     cur._titleManual=false; // el producto nuevo NO hereda edición manual del anterior
@@ -5811,8 +5821,16 @@ async function _addBulkInternal() {
   // "reemplazar en vez de rechazar" vive en _doAddBulk() (que resuelve el
   // índice real al momento de guardar); aquí solo se deja pasar cuando
   // corresponde, y el bloqueo normal sigue intacto para cualquier otro caso.
-  if (bulk.find(function(b){ return b.upc === cur.upc; }) &&
-      !(_psReturnToFixUpc && _psReturnToFixUpc === cur.upc)) {
+  //
+  // 17 sep 2026 — Investigación #6. Un mismo UPC puede tener varias filas
+  // (2pk/3pk/6pk vía Bulk Split), así que "UPC coincide" ya no basta para
+  // dejar pasar: cuando _psReturnToFixSku está presente, también se exige
+  // que el SKU que se va a guardar sea EXACTAMENTE el de la fila que se
+  // está corrigiendo. Sin eso, esta guardia dejaría pasar una corrección
+  // que en realidad apunta a una fila prima con el mismo UPC.
+  var _rtfMatchesThisUpc = _psReturnToFixUpc && _psReturnToFixUpc === cur.upc;
+  var _rtfMatchesThisSku = _rtfMatchesThisUpc && (!_psReturnToFixSku || _psReturnToFixSku === usedSKU);
+  if (bulk.find(function(b){ return b.upc === cur.upc; }) && !_rtfMatchesThisSku) {
     toast('⚠️ Already in CSV'); return;
   }
 
@@ -5874,8 +5892,15 @@ async function _doAddBulk(usedTitle, usedSKU, usedPrice, shade, expDate, locatio
   // producir una URL solo visualmente idéntica, no la misma. Por eso ambas
   // fotos y descripción se preservan tal cual para ese caso específico, sin
   // pasar por el pipeline normal.
+  // 17 sep 2026 — Investigación #6. Igual que en la guardia de
+  // _addBulkInternal(): un mismo UPC puede tener varias filas (Bulk Split),
+  // así que cuando hay un SKU objetivo exacto (_psReturnToFixSku), el índice
+  // de reemplazo se resuelve por SKU, no solo por UPC — nunca se reemplaza
+  // la fila equivocada entre varias que comparten el mismo UPC.
   var _replaceIdx = (_psReturnToFixUpc && cur && cur.upc && cur.upc === _psReturnToFixUpc)
-    ? bulk.findIndex(function(b){ return b.upc === cur.upc; })
+    ? bulk.findIndex(function(b){
+        return _psReturnToFixSku ? (b.sku === _psReturnToFixSku) : (b.upc === cur.upc);
+      })
     : -1;
   var _rehydratedReplace = !!(cur && cur._psRehydrated && _replaceIdx !== -1);
 
@@ -5975,6 +6000,7 @@ async function _doAddBulk(usedTitle, usedSKU, usedPrice, shade, expDate, locatio
     bulk[_replaceIdx] = _newRow;
     _updated = true;
     _psReturnToFixUpc = null;
+    _psReturnToFixSku = null;
   } else {
     bulk.push(_newRow);
   }
@@ -5990,6 +6016,12 @@ async function _doAddBulk(usedTitle, usedSKU, usedPrice, shade, expDate, locatio
   if (cur && cur.upc && typeof psCaptureEditorSnapshot === 'function' && typeof psBuildEditorSnapshotFromCur === 'function') {
     psCaptureEditorSnapshot(cur.upc, psBuildEditorSnapshotFromCur(cur));
   }
+  // 17 sep 2026 — Investigación #6. El botón ADD TO CSV decidía éxito/fallo
+  // comparando bulk.length antes/después — un reemplazo en su lugar nunca
+  // cambia esa longitud, así que una corrección exitosa se veía idéntica a
+  // "no pasó nada". Este resultado explícito le da al botón la información
+  // real (added vs. replaced) sin tener que inferirla del tamaño del array.
+  window._psLastAddResult = { added: _updated ? 0 : 1, replaced: _updated ? 1 : 0, skippedDup: 0 };
   // Mostrar confirmación clara de auto-save
   var msg = (_updated ? '✅ Updated — ' : '✅ Added — ') + bulk.length + ' in CSV (Auto-saved to device)';
   toast(msg);
@@ -6361,7 +6393,13 @@ async function addSplitPacksToCSV(){
   var location = cur.location || '';
   var baseTitle = (window._packState && window._packState.baseTitle) || cur.title || '';
 
-  var added = 0, skippedDup = 0;
+  var added = 0, skippedDup = 0, replaced = 0;
+  // 17 sep 2026 — Investigación #6. true SOLO cuando la fila EXACTA que
+  // "Regresar y corregir" señaló (_psReturnToFixUpc + _psReturnToFixSku) fue
+  // efectivamente reemplazada en este ciclo — nunca por haber tocado
+  // cualquier otra fila del mismo UPC. Controla si el contexto se limpia al
+  // final.
+  var _targetReplacedThisRun = false;
   // ── P0-A FIX: Pack selection must be based on user's active selection alone, not on quantity calculation.
   // User explicitly selecting a pack size should ALWAYS generate a CSV row, even if initial quantity is low.
   var packsToAdd = PACK_SIZES.filter(function(p){ return active[p]; });
@@ -6472,9 +6510,20 @@ async function addSplitPacksToCSV(){
     var _wMajor = _pkgLb > 0 ? Math.floor(_pkgLb) : 0;
     var _wMinor = _pkgLb > 0 ? Math.round((_pkgLb - _wMajor) * 16) : 0;
     if (_wMinor === 16) { _wMajor += 1; _wMinor = 0; }
-    var dup = false;
-    for (var j = 0; j < bulk.length; j++) { if (bulk[j].sku === sku) { dup = true; break; } }
-    if (dup) { skippedDup++; continue; }
+    var dupIdx = -1;
+    for (var j = 0; j < bulk.length; j++) { if (bulk[j].sku === sku) { dupIdx = j; break; } }
+
+    // 17 sep 2026 — Investigación #6. Un SKU duplicado normal se sigue
+    // saltando exactamente igual (skippedDup++/continue, sin cambios). Pero
+    // si ESTE SKU exacto es la fila que "Regresar y corregir" está
+    // corrigiendo, se reemplaza en su lugar en vez de saltarla — sin tocar
+    // ninguna otra fila del mismo UPC (p.ej. 2pk/6pk siguen su camino normal
+    // de duplicado-salta si ya existían, aunque estén activas en el mismo
+    // reparto).
+    var _isExactReturnTarget = dupIdx !== -1 && _psReturnToFixUpc && _psReturnToFixSku &&
+      cur.upc === _psReturnToFixUpc && sku === _psReturnToFixSku;
+
+    if (dupIdx !== -1 && !_isExactReturnTarget) { skippedDup++; continue; }
 
     var title = rebuildTitle(baseTitle, p, shade, expDate);
     var price = calcBundlePrice(cur.ebay || {}, p);
@@ -6506,7 +6555,7 @@ async function addSplitPacksToCSV(){
     // Diagnostics visible in console for zero-quantity investigation.
     var qty = getSplitListings(split, p);
 
-    bulk.push({
+    var _row = {
       sku:         sku,
       title:       title,
       price:       price,
@@ -6530,8 +6579,18 @@ async function addSplitPacksToCSV(){
       weightMinor: _wMinor,
       truck:       window._truckNumber || '',
       scannedBy:   SAVVY_CURRENT_USER || 'unknown'
-    });
-    added++;
+    };
+
+    if (_isExactReturnTarget) {
+      // Reemplazo EN SU LUGAR: mismo índice, mismo SKU/UPC, sin reordenar,
+      // sin duplicar. Ninguna otra fila del mismo UPC se toca en esta rama.
+      bulk[dupIdx] = _row;
+      replaced++;
+      _targetReplacedThisRun = true;
+    } else {
+      bulk.push(_row);
+      added++;
+    }
   }
 
   saveBulkToStorage();
@@ -6540,11 +6599,27 @@ async function addSplitPacksToCSV(){
   // estado operacional del producto FUENTE (cur.upc) tomado aquí, después
   // de que los packs del split ya se guardaron y sus fotos ya se subieron
   // arriba — nunca antes.
-  if (added > 0 && cur && cur.upc && typeof psCaptureEditorSnapshot === 'function' && typeof psBuildEditorSnapshotFromCur === 'function') {
+  // 17 sep 2026 — Investigación #6. Un reemplazo exacto (replaced>0) también
+  // debe capturar snapshot — no solo un alta nueva (added>0) — porque la
+  // corrección de la fecha de expiración ya se aplicó a bulk[dupIdx].
+  if ((added > 0 || replaced > 0) && cur && cur.upc && typeof psCaptureEditorSnapshot === 'function' && typeof psBuildEditorSnapshotFromCur === 'function') {
     psCaptureEditorSnapshot(cur.upc, psBuildEditorSnapshotFromCur(cur));
   }
-  if (added > 0) {
-    var msg = '✅ ' + added + ' pack(s) agregados al CSV' + (skippedDup ? ' — ' + skippedDup + ' ya estaban' : '') + ' (Auto-saved: ' + bulk.length + ' total)';
+  // 17 sep 2026 — Investigación #6. El contexto de "Regresar y corregir" solo
+  // se limpia cuando la fila EXACTA objetivo fue reemplazada en esta corrida
+  // — nunca solo porque el loop se ejecutó. Si el reemplazo objetivo falló
+  // (p.ej. porque ese pack ya no estaba activo), el contexto permanece para
+  // que el empleado pueda reintentar.
+  if (_targetReplacedThisRun) {
+    _psReturnToFixUpc = null;
+    _psReturnToFixSku = null;
+  }
+  window._psLastAddResult = { added: added, replaced: replaced, skippedDup: skippedDup };
+  if (added > 0 || replaced > 0) {
+    var _parts = [];
+    if (added > 0) _parts.push(added + ' agregado(s)');
+    if (replaced > 0) _parts.push(replaced + ' actualizado(s)');
+    var msg = '✅ ' + _parts.join(', ') + ' al CSV' + (skippedDup ? ' — ' + skippedDup + ' ya estaban' : '') + ' (Auto-saved: ' + bulk.length + ' total)';
     toast(msg);
     console.log('PERSIST: ' + msg);
 
@@ -8777,16 +8852,28 @@ function renderResult(r){
 
       // Contar bulk antes
       var bulkBefore = (typeof bulk !== 'undefined' && Array.isArray(bulk)) ? bulk.length : 0;
+      // 17 sep 2026 — Investigación #6. bulkAfter-bulkBefore no distingue un
+      // reemplazo EN SU LUGAR (exact-SKU return-to-fix) de "no pasó nada" —
+      // ambos dejan bulk.length igual. window._psLastAddResult, escrito por
+      // _doAddBulk()/addSplitPacksToCSV(), es la fuente de verdad real.
+      window._psLastAddResult = null;
 
       try {
         await addBulk();
         // Contar bulk después
         var bulkAfter = (typeof bulk !== 'undefined' && Array.isArray(bulk)) ? bulk.length : 0;
         var added = bulkAfter - bulkBefore;
+        var _r = window._psLastAddResult;
+        var _replaced = (_r && _r.replaced) || 0;
 
-        if (added > 0) {
-          // ÉXITO — feedback verde brillante
-          addB.textContent = '✅ AGREGADO (' + added + ' pack' + (added>1?'s':'') + ')';
+        if (added > 0 || _replaced > 0) {
+          // ÉXITO — feedback verde brillante. Un reemplazo exitoso (fila
+          // corregida en su lugar) es éxito igual que un alta nueva, aunque
+          // bulk.length no haya cambiado.
+          var _label = _replaced > 0 && added <= 0
+            ? '✅ ACTUALIZADO (' + _replaced + ' pack' + (_replaced>1?'s':'') + ')'
+            : '✅ AGREGADO (' + added + ' pack' + (added>1?'s':'') + ')';
+          addB.textContent = _label;
           addB.style.background = '#00c853';
           addB.style.opacity = '1';
           setTimeout(function(){
@@ -9068,7 +9155,7 @@ function clearBulkSession() {
   ov.innerHTML = '<div style="background:var(--sf);border-radius:16px;padding:24px;width:100%;max-width:320px;text-align:center">'
     + '<div style="font-size:18px;font-weight:800;margin-bottom:8px">🗑 Clear Session</div>'
     + '<div style="font-size:14px;color:var(--mu);margin-bottom:20px">Borrar ' + bulk.length + ' producto(s)?</div>'
-    + '<button onclick="bulk=[];psClearAllEditorSnapshots();updateFAB();renderBulk();saveBulkToStorage();document.querySelectorAll(\'.clear-ov\').forEach(e=>e.remove());toast(\'✅ Sesión limpiada\')" '
+    + '<button onclick="bulk=[];psClearAllEditorSnapshots();_psReturnToFixUpc=null;_psReturnToFixSku=null;updateFAB();renderBulk();saveBulkToStorage();document.querySelectorAll(\'.clear-ov\').forEach(e=>e.remove());toast(\'✅ Sesión limpiada\')" '
     + 'style="width:100%;padding:12px;background:#e74c3c;color:#fff;border:none;border-radius:10px;font-size:15px;font-weight:800;cursor:pointer;margin-bottom:8px;display:block">Sí, borrar todo</button>'
     + '<button onclick="document.querySelectorAll(\'.clear-ov\').forEach(e=>e.remove())" '
     + 'style="width:100%;padding:10px;background:none;border:1px solid #555;border-radius:10px;color:#888;cursor:pointer;display:block">Cancelar</button>'
@@ -9450,11 +9537,20 @@ function psFindBulkIndexByUpc(upc) {
 }
 window.psFindBulkIndexByUpc = psFindBulkIndexByUpc;
 
+// 17 sep 2026 — Investigación #6. Un UPC puede tener varias filas en bulk
+// (Bulk Split: SER-UPC-2pk, SER-UPC-3pk, SER-UPC-6pk) — resolver por SKU
+// exacto es la única forma segura de identificar CUÁL fila corregir.
+function psFindBulkIndexBySku(sku) {
+  return bulk.findIndex(function(b){ return b.sku === sku; });
+}
+window.psFindBulkIndexBySku = psFindBulkIndexBySku;
+
 function psShowExpBlockedModal(noExpList) {
   var existing = document.getElementById('expBlockOv');
   if (existing) existing.remove();
 
   var firstUpc = (noExpList[0] && noExpList[0].upc) || '';
+  var firstSku = (noExpList[0] && noExpList[0].sku) || '';
   var listHtml = noExpList.map(function(it){
     return '<div style="font-family:monospace;font-size:13px;color:#fff;padding:2px 0">• ' + esc(it.sku || it.title || '?') + '</div>';
   }).join('');
@@ -9479,7 +9575,7 @@ function psShowExpBlockedModal(noExpList) {
   });
   document.getElementById('expBlockReturnBtn').addEventListener('click', function(){
     ov.remove();
-    psReturnAndFixExpDate(firstUpc);
+    psReturnAndFixExpDate(firstUpc, firstSku);
   });
 }
 window.psShowExpBlockedModal = psShowExpBlockedModal;
@@ -9497,8 +9593,12 @@ window.psShowExpBlockedModal = psShowExpBlockedModal;
 // antes de escribir los valores del snapshot encima.
 var PS_RETURN_TO_FIX_RESTORE_DELAY_MS = 150;
 
-function psReturnAndFixExpDate(targetUpc) {
-  var idx = psFindBulkIndexByUpc(targetUpc);
+function psReturnAndFixExpDate(targetUpc, targetSku) {
+  // 17 sep 2026 — Investigación #6. Resolver por SKU exacto primero — la
+  // fila que EXPORT DETENIDO señaló es la fuente de verdad de esta
+  // identidad. Cae a UPC solo para filas viejas sin SKU capturado.
+  var idx = targetSku ? psFindBulkIndexBySku(targetSku) : -1;
+  if (idx === -1) idx = psFindBulkIndexByUpc(targetUpc);
   if (idx === -1) {
     toast('⚠️ Ese producto ya no está en la sesión CSV');
     return;
@@ -9522,6 +9622,7 @@ function psReturnAndFixExpDate(targetUpc) {
     // reaplica igual más abajo porque renderResult() lo va a resetear de
     // todos modos (ver Investigación #4) — no por desconfiar de `cur`.
     _psReturnToFixUpc = row.upc;
+    _psReturnToFixSku = row.sku;
   } else {
     // CASO cur SOBRESCRITO — se escaneó otro producto después de agregar
     // esta fila (cur=res; en el flujo de escaneo reemplaza el objeto
@@ -9567,6 +9668,7 @@ function psReturnAndFixExpDate(targetUpc) {
       ebay: {}
     };
     _psReturnToFixUpc = row.upc;
+    _psReturnToFixSku = row.sku;
   }
 
   // ── ORDEN CRÍTICO (Investigación #4) ─────────────────────────────────
@@ -10715,7 +10817,7 @@ document.addEventListener('DOMContentLoaded',()=>{
       ov2.innerHTML='<div style="background:#1a1a1a;border-radius:16px;padding:24px;width:100%;max-width:320px;text-align:center">'
         +'<div style="font-size:18px;font-weight:800;margin-bottom:8px;color:#fff">\ud83d\uddd1 Clear Session</div>'
         +'<div style="font-size:14px;color:#888;margin-bottom:20px">Vas a borrar '+bulk.length+' producto(s). \u00bfConfirmas?</div>'
-        +'<button onclick="bulk=[];psClearAllEditorSnapshots();updateFAB();renderBulk();saveBulkToStorage();this.closest(\'div[style*=fixed]\').remove();toast(\'\u2705 Sesi\u00f3n limpiada\')" style="width:100%;padding:12px;background:#e74c3c;color:#fff;border:none;border-radius:10px;font-size:15px;font-weight:800;cursor:pointer;margin-bottom:8px">S\u00ed, borrar todo</button>'
+        +'<button onclick="bulk=[];psClearAllEditorSnapshots();_psReturnToFixUpc=null;_psReturnToFixSku=null;updateFAB();renderBulk();saveBulkToStorage();this.closest(\'div[style*=fixed]\').remove();toast(\'\u2705 Sesi\u00f3n limpiada\')" style="width:100%;padding:12px;background:#e74c3c;color:#fff;border:none;border-radius:10px;font-size:15px;font-weight:800;cursor:pointer;margin-bottom:8px">S\u00ed, borrar todo</button>'
         +'<button onclick="this.closest(\'div[style*=fixed]\').remove()" style="width:100%;padding:10px;background:none;border:1px solid #555;border-radius:10px;color:#888;cursor:pointer">Cancelar</button>'
         +'</div>';
       document.body.appendChild(ov2);
