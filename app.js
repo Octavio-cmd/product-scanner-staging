@@ -4135,6 +4135,38 @@ function classifySpanRole(span, index, spans, curObj) {
     return 'BRAND'; // RIGID
   }
 
+  // 18 sep 2026 — Investigación #7. Un sustantivo de forma ingerible
+  // (cápsula/tableta/softgel/gomita/...) es un HECHO del producto —
+  // detectType() lo usa como evidencia decisiva (_hasIngestibleForm) para
+  // no confundir un suplemento con un cosmético tópico. La regla de abajo
+  // que marca "capsule"/"tablet" como SECONDARY_DESCRIPTOR es vocabulario de
+  // juguetes/coleccionables ("capsule toy", figuras de "blind box"), y sin
+  // este guard capturaba también la forma de dosis de un suplemento real:
+  // SER-681168301026-3pk perdía la palabra "Capsules" al ajustar el título
+  // a 80 caracteres, detectType() se quedaba sin evidencia y el CSV exportó
+  // C:Type = Vitamin/Other en vez de Capsule aunque C:Formulation y C:Item
+  // Form ya decían "Capsule".
+  // Reutiliza psDetectIngestibleForm() (ya usado para C:Formulation/C:Item
+  // Form) en vez de inventar un vocabulario paralelo. El contexto de
+  // juguete se revisa sobre el TÍTULO COMPLETO (no solo este span) para que
+  // "Capsule Toy Surprise Figure"/"Collectible Blind Box Capsule Toy
+  // Figure" sigan sin ganar semántica de salud — nunca una promoción
+  // global de la palabra suelta.
+  if (typeof psDetectIngestibleForm === 'function' && psDetectIngestibleForm(value)) {
+    var _ingestFullTitle = spans.map(function (s) { return s.value; }).join(' ');
+    var _isToyContext = /\b(toy|toys|figure|figurine|blind[\s-]?box|collectible)\b/i.test(_ingestFullTitle);
+    // 18 sep 2026 — rol propio (no PRIMARY_FACT genérico): un título real,
+    // en Title Case, hace que classifySpanRole() etiquete casi cualquier
+    // par de palabras mayúsculas como CORE_PRODUCT (semanticScore 850) vía
+    // el heurístico genérico de abajo — relleno de marketing como "Support
+    // Complex"/"Extra Strength" incluido. Con PRIMARY_FACT (750, por debajo
+    // de CORE_PRODUCT) la forma de dosis se sacrificaba ANTES que ese
+    // relleno genérico — al revés de lo que pide la corrección. INGESTIBLE_FORM
+    // (ver semanticImportance() y annotateSpans() más abajo) prioriza el
+    // hecho de dosis por encima de CORE_PRODUCT sin tocar BRAND/PRODUCT_TYPE.
+    if (!_isToyContext) return 'INGESTIBLE_FORM';
+  }
+
   // Check if this span ends in product-type indicators
   var isTypeIndicator = /[Ss]et|[Kk]it|[Pp]ack\b/.test(value);
   if (isTypeIndicator && wordCount === 2) {
@@ -4214,6 +4246,14 @@ function semanticImportance(role) {
   var scores = {
     'BRAND': 1000,
     'PRODUCT_TYPE': 900,
+    // 18 sep 2026 — Investigación #7. Por encima de CORE_PRODUCT (850):
+    // en un título real, casi todo par de palabras en Title Case cae en
+    // CORE_PRODUCT vía el heurístico genérico de abajo, relleno de
+    // marketing incluido ("Support Complex", "Extra Strength"). La forma
+    // de dosis (cápsula/tableta/softgel/gomita) es más importante que ese
+    // relleno genérico, no menos — debe sobrevivir mientras quede filler
+    // CORE_PRODUCT/VARIANT que sacrificar.
+    'INGESTIBLE_FORM': 875,
     'CORE_PRODUCT': 850,
     'PRODUCT_LINE': 800,
     'PRIMARY_FACT': 750,
@@ -4244,6 +4284,12 @@ function annotateSpans(spans, base, curObj) {
     // Adjust priority based on role classification
     if (role === 'PRODUCT_TYPE' && maxPriority < 5) {
       maxPriority = 5; // PRODUCT_TYPE is RIGID
+    } else if (role === 'INGESTIBLE_FORM' && maxPriority < 4.5) {
+      // 18 sep 2026 — Investigación #7. Mismo nivel que "N Total" (4.5,
+      // "dato comercial obligatorio"): la forma de dosis es igual de
+      // obligatoria y debe sobrevivir mientras quede CORE_PRODUCT/VARIANT
+      // (4 o menos) que recortar primero.
+      maxPriority = 4.5;
     } else if (role === 'CORE_PRODUCT' && maxPriority < 4) {
       maxPriority = 4; // CORE_PRODUCT is VERY_HIGH
     } else if (role === 'PRIMARY_FACT' && maxPriority < 4) {
