@@ -6633,16 +6633,43 @@ async function psCheckSellbrite(upc, brand){
     });
     window._psSbExisting = sbExisting;
     if (!window._splitActive) window._splitActive = {1:true,2:false,3:true,4:false,5:false,6:true,7:false,8:false,9:false,10:false,11:false,12:true};
+
+    // 17 sep 2026 — Investigación #5. psCheckSellbrite() corre en CADA
+    // renderResult(), incluido el regreso a corregir un producto cuyo Bulk
+    // Split ya fue decidido y GUARDADO por el empleado (la fila ya está en
+    // CSV Session). La respuesta de Sellbrite puede tardar bastante más que
+    // el snapshot restore de "Regresar y corregir" (~150ms vs. hasta
+    // varios segundos), así que si llega tarde terminaba pisando en
+    // silencio una decisión ya tomada — esto NO es una nueva decisión de
+    // sourcing, es una corrección de un campo puntual (p.ej. expiración).
+    //
+    // _psReturnToFixUpc es el contexto durable ya usado por el guardia de
+    // UPC duplicado de _addBulkInternal() — dura hasta que la fila se
+    // actualiza con éxito, no solo unos ms, así que es la protección
+    // correcta aquí también. Mientras esté activo PARA ESTE UPC exacto: la
+    // info de Sellbrite se sigue guardando (window._psSbExisting, ya
+    // asignado arriba) y updateSplitCalc() se sigue llamando para que un
+    // pack activo con match en Sellbrite muestre igual el badge
+    // informativo "✅ En Sellbrite" (rama isOn de renderSplitCalc — ya
+    // soportado, sin cambios de UI) — pero NUNCA se excluye el pack ni se
+    // borra su asignación manual. Un escaneo normal (_psReturnToFixUpc no
+    // coincide con este UPC) sigue exactamente el comportamiento de
+    // siempre: auto-excluir packs ya listados en Sellbrite.
+    var _inReturnToFixForThisUpc = !!(_psReturnToFixUpc && String(_psReturnToFixUpc).replace(/\D/g,'') === upcClean);
     var autoExcluded = [];
-    PACK_SIZES.forEach(function(pn){
-      if (sbExisting[pn] && window._splitActive[pn]) {
-        window._splitActive[pn] = false;
-        autoExcluded.push(pn + 'pk');
-      }
-    });
-    if (autoExcluded.length) {
-      toast('✅ Ya en Sellbrite: ' + autoExcluded.join(', ') + ' — excluidos del reparto');
+    if (_inReturnToFixForThisUpc) {
       try { updateSplitCalc(); } catch(e) {}
+    } else {
+      PACK_SIZES.forEach(function(pn){
+        if (sbExisting[pn] && window._splitActive[pn]) {
+          window._splitActive[pn] = false;
+          autoExcluded.push(pn + 'pk');
+        }
+      });
+      if (autoExcluded.length) {
+        toast('✅ Ya en Sellbrite: ' + autoExcluded.join(', ') + ' — excluidos del reparto');
+        try { updateSplitCalc(); } catch(e) {}
+      }
     }
     _psSellbriteProducts = {}; // guardar info para el update por SKU
     _psSbInvVacio = {};        // marca los SKU cuyo inventario vino vacío
