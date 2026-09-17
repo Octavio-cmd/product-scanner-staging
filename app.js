@@ -10022,8 +10022,29 @@ async function exportCSV(){
 
     // ── SUPLEMENTOS Y MEDICINA ─────────────────────────────────────
     // Vitaminas y suplementos: el Type "Vitamin"/"Supplement" es mejor para
-    // búsqueda que la forma (tablet/capsule), así que va PRIMERO.
-    if(/multivitamin|vitamin [abcdek]|vitamin d3|vitamin b12|prenatal vitamin/.test(t)) return 'Vitamin';
+    // búsqueda que la forma (tablet/capsule), así que va PRIMERO...
+    // 18 sep 2026 — Investigación #8. ...SOLO cuando el título no declara
+    // una forma de dosis explícita. UPC 681168301026 (categoría real 11776)
+    // exportó C:Type = Vitamin con C:Formulation/C:Item Form = Capsule
+    // porque el título final decía "SeroVital Reverse Capsules Supplement
+    // 252 Total..." — "multivitamin"/"vitamin d3" nunca coincidían ahí, pero
+    // esta regla sí lo habría hecho para títulos como "Daily Multivitamin
+    // Gummies", donde la forma (Gummy) es la evidencia correcta. Igual que
+    // el guard !_hasIngestibleForm ya usado arriba para Face Cream/Body
+    // Lotion/Serum/Lotion (Investigación #1) — misma variable, mismo
+    // patrón, reutilizado aquí para la clase genérica vitamina/suplemento.
+    // Sin forma explícita ("Daily Multivitamin") el comportamiento genérico
+    // no cambia — sigue devolviendo 'Vitamin' exactamente igual que antes.
+    if(!_hasIngestibleForm && /multivitamin|vitamin [abcdek]|vitamin d3|vitamin b12|prenatal vitamin/.test(t)) return 'Vitamin';
+    // 18 sep 2026 — Investigación #8. Las tres reglas siguientes (ingrediente
+    // AMBIGUO/"Supplement" genérico por ingrediente, Fiber/Protein/Sports
+    // Supplement, testosterone booster) NO se tocan aquí: ninguna fixture
+    // determinística de la matriz aprobada (Investigación #8) las alcanza —
+    // sus vocabularios (probiotic, fish oil, biotin, metamucil, whey
+    // protein, creatine, testosterone booster, etc.) no aparecen en ningún
+    // título de la matriz de colisión Forma+Clase. Cambiarlas sin una
+    // fixture real que lo exija sería adivinar, no corregir — se dejan
+    // intactas hasta que una fixture concreta demuestre la misma colisión.
     // ── Ingredientes AMBIGUOS: biotin, collagen y omega-3 aparecen tanto en
     // suplementos que se ingieren (cápsulas, gomitas, softgels — incluso
     // "fish OIL" softgels) como en productos tópicos (aceite de cabello,
@@ -10041,7 +10062,15 @@ async function exportCSV(){
     if(/whey protein|protein powder|protein shake|mass gainer/.test(t)) return 'Protein Powder';
     if(/creatine|pre.?workout|bcaa|amino acid/.test(t)) return 'Sports Supplement';
     if(/testosterone booster|test booster|nugenix|t.boost/.test(t)) return 'Supplement';
-    if(/\bvitamin\b|supplement/.test(t)) return 'Vitamin';
+    // 18 sep 2026 — Investigación #8. Causa raíz real: esta era la regla que
+    // interceptaba SER-681168301026-3pk — "Supplement" en el título ganaba
+    // aquí antes de que el bloque "Forma" de abajo (líneas siguientes)
+    // pudiera ver "Capsules". Mismo guard !_hasIngestibleForm que arriba:
+    // sin forma explícita ("Immune Support Supplement") sigue devolviendo
+    // 'Vitamin' sin cambios; con forma explícita ("Daily Supplement
+    // Capsules"), cede el paso al bloque "Forma" para que la evidencia más
+    // específica gane, tal como exige el contrato aprobado del clasificador.
+    if(!_hasIngestibleForm && /\bvitamin\b|supplement/.test(t)) return 'Vitamin';
     // Medicina OTC
     if(/ibuprofen|tylenol|advil|motrin|aspirin|acetaminophen|naproxen|aleve/.test(t)) return 'Pain Reliever';
     if(/antihistamine|allergy relief|zyrtec|claritin|benadryl|allegra/.test(t)) return 'Allergy Relief';
