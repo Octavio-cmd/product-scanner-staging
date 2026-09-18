@@ -6743,13 +6743,22 @@ async function psCheckSellbrite(upc, brand){
     }
 
     const products = data.products;
-    // ── Detectar qué packs (1/3/6/12) YA existen en Sellbrite y auto-excluirlos ──
+    // ── Detectar qué packs YA existen en Sellbrite y auto-excluirlos ──
+    // 18 sep 2026 — Investigación #9. Antes solo reconocía pn===1||3||6||12
+    // — un remanente de cuando Bulk Split solo ofrecía esos 4 niveles. Bulk
+    // Split ahora soporta los 12 tamaños de PACK_SIZES, así que un listado
+    // existente de 2pk/4pk/5pk/7pk/8pk/9pk/10pk/11pk en Sellbrite era
+    // estructuralmente invisible aquí — nunca se auto-excluía y nunca
+    // mostraba el badge informativo "En Sellbrite", aunque el SKU viniera
+    // perfectamente formado. PACK_SIZES ya es la fuente de verdad que usa
+    // el resto de Bulk Split (parseIntoSpans, computeSplit, etc.) — se
+    // reutiliza aquí en vez de mantener una segunda lista aparte.
     var sbExisting = {};
     products.forEach(function(p){
       var m = String(p.sku || '').toUpperCase().match(/-(\d+)\s*PK$/);
       if (m && String(p.sku || '').indexOf(upcClean) >= 0) {
         var pn = parseInt(m[1], 10);
-        if (pn === 1 || pn === 3 || pn === 6 || pn === 12) sbExisting[pn] = true;
+        if (PACK_SIZES.indexOf(pn) !== -1) sbExisting[pn] = true;
       }
     });
     window._psSbExisting = sbExisting;
