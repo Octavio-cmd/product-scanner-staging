@@ -165,6 +165,10 @@ const foodTypesMatch = appSrc.match(/var PS_FOOD_TYPES = (\[[\s\S]*?\]);/);
 const beautyTypesMatch = appSrc.match(/var PS_TOPICAL_BEAUTY_TYPES = (\[[^\]]*\]);/);
 eval('var PS_FOOD_TYPES = ' + foodTypesMatch[1] + ';');
 eval('var PS_TOPICAL_BEAUTY_TYPES = ' + beautyTypesMatch[1] + ';');
+// 18 sep 2026 — Investigación #13: catId() and detectType() now call the
+// shared psIsPaperTowelTitle() helper — extract it too, or they throw
+// ReferenceError when evaluated standalone like this.
+eval(extractFn('psIsPaperTowelTitle'));
 eval(extractFn('catId'));
 eval(extractFn('detectType'));
 eval(extractFn('psTypeCategoryPlausible'));

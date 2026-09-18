@@ -526,6 +526,10 @@ REQUIRED.forEach(fn => checkTrue(`loaded: ${fn}()`, typeof sandbox[fn] === 'func
   const beautyTypesMatch = appSrc.match(/var PS_TOPICAL_BEAUTY_TYPES = (\[[^\]]*\]);/);
   eval('var PS_FOOD_TYPES = ' + foodTypesMatch[1] + ';');
   eval('var PS_TOPICAL_BEAUTY_TYPES = ' + beautyTypesMatch[1] + ';');
+  // 18 sep 2026 — Investigación #13: detectType() now calls the shared
+  // psIsPaperTowelTitle() helper — extract it too so detectType() doesn't
+  // throw ReferenceError if evaluated standalone like this.
+  eval(extractFn('psIsPaperTowelTitle'));
   eval(extractFn('detectType'));
   const serovitalType = detectType('180959', SEROVITAL_TITLE);
   check('X7: C:Type for SeroVital is Capsule', serovitalType, 'Capsule');

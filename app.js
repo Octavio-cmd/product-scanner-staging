@@ -506,6 +506,25 @@ function makeSKU(brand,upc,packs,title){
   return pfx+'-'+upc+'-'+packs+'pk';
 }
 
+// ── EVIDENCIA REAL de papel toalla, no solo la marca ──────────────────────
+// 18 sep 2026 — Investigación #13. "Bounty" y "Scott" son también marcas de
+// OTROS productos ("Nature's Bounty" vitaminas/suplementos, "Scott" tisú).
+// El nombre de marca solo no prueba que el producto sea papel toalla — hace
+// falta evidencia real (la frase "paper towel(s)"/"towel roll(s)", o la
+// marca junto con la palabra "towel" en el mismo título). Usada por catId()
+// (dos apariciones duplicadas) y por detectType() — una sola fuente de
+// verdad para las tres, en vez de tres regex independientes que puedan
+// volver a desincronizarse.
+function psIsPaperTowelTitle(title) {
+  var t = (title || '').toLowerCase();
+  // La frase completa ya es evidencia suficiente por sí sola.
+  if (/paper towels?|towel rolls?/.test(t)) return true;
+  // Nombre de marca (bounty/scott/viva/brawny) NO basta solo — solo cuenta
+  // si el título también dice "towel(s)" en algún lugar.
+  if (/\b(bounty|scott|viva|brawny)\b/.test(t) && /\btowels?\b/.test(t)) return true;
+  return false;
+}
+
 // Categorys — mapa completo de categorías leaf de eBay
 function catId(n){
   const t=(n||'').toLowerCase();
@@ -573,7 +592,7 @@ function catId(n){
   if(/dawn dish|palmolive|dawn ultra|dish soap|dishwashing liquid|cascade dishwasher/i.test(t))return'20625';
   if(/lysol|clorox|windex|mr.clean|pine.sol|fabuloso|409|fantastik|comet cleanser|ajax cleanser/i.test(t))return'20625';
   if(/febreze|glade|air freshener|car freshener|room spray|odor eliminator/i.test(t))return'20625';
-  if(/paper towel|bounty|scott towel|viva towel|brawny/i.test(t))return'20625';
+  if(psIsPaperTowelTitle(t))return'20625';
   if(/toilet paper|charmin|cottonelle|scott tissue|angel soft/i.test(t))return'20625';
   if(/tissue|kleenex|puffs|facial tissue/i.test(t))return'20625';
   if(/trash bag|garbage bag|hefty|glad bag|ziploc|plastic wrap|aluminum foil|sandwich bag/i.test(t))return'20625';
@@ -602,7 +621,7 @@ function catId(n){
   if(/dawn dish|palmolive|dawn ultra|dish soap|dishwashing liquid|cascade dishwasher/i.test(t))return'20625';
   if(/lysol|clorox|windex|mr.clean|pine.sol|fabuloso|409|fantastik|comet cleanser|ajax cleanser/i.test(t))return'20625';
   if(/febreze|glade|air freshener|car freshener|room spray|odor eliminator/i.test(t))return'20625';
-  if(/paper towel|bounty|scott towel|viva towel|brawny/i.test(t))return'20625';
+  if(psIsPaperTowelTitle(t))return'20625';
   if(/toilet paper|charmin|cottonelle|scott tissue|angel soft/i.test(t))return'20625';
   if(/tissue|kleenex|puffs|facial tissue/i.test(t))return'20625';
   if(/trash bag|garbage bag|hefty|glad bag|ziploc|plastic wrap|aluminum foil|sandwich bag/i.test(t))return'20625';
@@ -9931,6 +9950,34 @@ async function exportCSV(){
     return true;
   }
 
+  // ── GUARDA DE CONSISTENCIA: Type ↔ Formulation/Item Form ────────────────
+  // 18 sep 2026 — Investigación #13. C:Type (typeVal) se calcula SOLO del
+  // título final comprimido (detectType(category, it.title)); C:Formulation
+  // / C:Item Form se resuelven antes, de una fuente canónica, y por eso
+  // pueden conocer la forma real aunque el título comprimido ya la haya
+  // perdido — exactamente lo que pasó con NAT-074312006951-1pk ("...Sleep3
+  // Maximum Strength...", sin la palabra "Tablet") exportando C:Type=Paper
+  // Towel con C:Formulation=Tablet en la MISMA fila. Nunca se reconciliaban
+  // entre sí.
+  //
+  // Red de seguridad MÍNIMA a propósito: solo entra en juego cuando la forma
+  // ya conocida es una de las formas ingeribles que la app YA reconoce en
+  // otras partes (Gummy/Softgel/Capsule/Tablet — el mismo vocabulario de
+  // _hasIngestibleForm/psDetectIngestibleForm, no uno nuevo) y el Type
+  // calculado no es ya esa misma forma. NO fuerza Type = Item Form para
+  // cualquier categoría/forma — Cream, Liquid, etc. quedan fuera a
+  // propósito, tal como pide el alcance aprobado.
+  var PS_INGESTIBLE_FORM_TYPES = ['Gummy', 'Softgel', 'Capsule', 'Tablet'];
+  function psReconcileTypeWithKnownForm(typeVal, formulationVal, itemFormVal) {
+    var knownForm = formulationVal || itemFormVal || '';
+    if (!knownForm) return typeVal;
+    var rescued = PS_INGESTIBLE_FORM_TYPES.filter(function(f) {
+      return f.toLowerCase() === String(knownForm).trim().toLowerCase();
+    })[0];
+    if (rescued && typeVal !== rescued) return rescued;
+    return typeVal;
+  }
+
   // El título describe el producto exacto; la categoría a veces cae al
   // default (Skin Care) y no refleja lo que realmente es. Por eso revisamos
   // el título primero, en orden de más específico a más general.
@@ -10056,7 +10103,21 @@ async function exportCSV(){
     // _hasIngestibleForm ya se calculó al principio de la función (16 sep
     // 2026, guarda de belleza tópica) — se reutiliza en vez de recalcularla.
     var _hasAmbiguousIngredient = /\bbiotin\b|\bcollagen\b|omega.?3/.test(t);
-    if(!(_hasAmbiguousIngredient && _hasTopicalForm && !_hasIngestibleForm) &&
+    // 18 sep 2026 — Investigación #13. NAT-031604042127-2pk: "Nature Made
+    // Multivitamin Omega-3 Gummies..." tiene _hasIngestibleForm=true (dice
+    // "gummies") pero _hasTopicalForm=false (no dice oil/cream/lotion/...),
+    // así que el guard de tres vías de abajo (pensado solo para el choque
+    // ingrediente+forma-tópica) nunca se activaba, y "omega-3" solo ganaba
+    // 'Supplement' ANTES de que el bloque "Forma" (más abajo) pudiera ver
+    // "gummies" y devolver 'Gummy'. Igual que ya se hizo para las reglas de
+    // vitamina/suplemento genéricas (Investigación #8): una forma de dosis
+    // EXPLÍCITA en el título (gummy/softgel/capsule/tablet — el mismo
+    // _hasIngestibleForm de siempre) tiene que ganarle a un ingrediente
+    // ambiguo genérico. Sin forma explícita ("Omega-3 Supplement") el
+    // comportamiento no cambia — sigue devolviendo 'Supplement' igual que
+    // antes.
+    if(!_hasIngestibleForm &&
+       !(_hasAmbiguousIngredient && _hasTopicalForm && !_hasIngestibleForm) &&
        /probiotic|omega.?3|fish oil|collagen|biotin|melatonin|turmeric|elderberry|ashwagandha|magnesium|zinc supplement|calcium supplement|iron supplement|coq10/.test(t)) return 'Supplement';
     if(/fiber supplement|metamucil|benefiber|psyllium/.test(t)) return 'Fiber Supplement';
     if(/whey protein|protein powder|protein shake|mass gainer/.test(t)) return 'Protein Powder';
@@ -10097,7 +10158,7 @@ async function exportCSV(){
     if(/dish soap|dishwashing liquid|dawn dish|cascade/.test(t)) return 'Dish Soap';
     if(/disinfectant|lysol|clorox|bleach|all.purpose cleaner|multi.surface/.test(t)) return 'Cleaner';
     if(/glass cleaner|windex/.test(t)) return 'Glass Cleaner';
-    if(/paper towel|bounty|scott towel/.test(t)) return 'Paper Towel';
+    if(psIsPaperTowelTitle(t)) return 'Paper Towel';
     if(/toilet paper|bath tissue|charmin|cottonelle/.test(t)) return 'Toilet Paper';
     if(/facial tissue|kleenex|puffs/.test(t)) return 'Facial Tissue';
     if(/trash bag|garbage bag|hefty|glad bag/.test(t)) return 'Trash Bag';
@@ -10677,6 +10738,11 @@ async function exportCSV(){
     // If Product Form is unresolved/conflict, export is already blocked above.
     var formulationVal = _specForCol('C:Formulation');
     var itemFormVal = _specForCol('C:Item Form');
+
+    // ── GUARDA DE CONSISTENCIA: Type ↔ Formulation/Item Form ──────────────
+    // 18 sep 2026 — Investigación #13. Ver psReconcileTypeWithKnownForm()
+    // (función de nivel superior, cerca de detectType()) para el porqué.
+    typeVal = psReconcileTypeWithKnownForm(typeVal, formulationVal, itemFormVal);
 
     // ── Active Ingredients / Ingredients: quitar la dosis del nombre del
     // ingrediente (ej. "Magnesium 400mg" → "Magnesium"). La dosis ya vive

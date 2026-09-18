@@ -316,10 +316,14 @@ checkTrue('8.1 multivitamin/vitamin-letter branch gated by !_hasIngestibleForm',
 checkTrue('8.2 generic vitamin|supplement branch gated by !_hasIngestibleForm',
   /if\(!_hasIngestibleForm && \/\\bvitamin\\b\|supplement\/\.test\(t\)\) return 'Vitamin';/.test(appSrc),
   'gated branch not found');
-checkTrue('8.3 ambiguous-ingredient Supplement branch left UNCHANGED (no deterministic fixture required it)',
-  /if\(!\(_hasAmbiguousIngredient && _hasTopicalForm && !_hasIngestibleForm\)\) *\n/.test(appSrc) === false &&
-  /if\(!\(_hasAmbiguousIngredient && _hasTopicalForm && !_hasIngestibleForm\) &&\s*\n\s*\/probiotic/.test(appSrc),
-  'ambiguous-ingredient branch text changed unexpectedly');
+// 18 sep 2026 — Investigación #13 gave this branch its own deterministic
+// fixture (NAT-031604042127-2pk, "...Omega-3 Gummies..." exporting
+// Supplement instead of Gummy), so it is no longer "left unchanged": it now
+// also carries the standalone !_hasIngestibleForm guard, same pattern as
+// 8.1/8.2 above.
+checkTrue('8.3 ambiguous-ingredient Supplement branch now ALSO gated by !_hasIngestibleForm (Investigación #13)',
+  /if\(!_hasIngestibleForm &&\s*\n\s*!\(_hasAmbiguousIngredient && _hasTopicalForm && !_hasIngestibleForm\) &&\s*\n\s*\/probiotic/.test(appSrc),
+  'ambiguous-ingredient branch missing the new !_hasIngestibleForm guard');
 checkTrue('8.4 testosterone booster Supplement branch left UNCHANGED',
   /if\(\/testosterone booster\|test booster\|nugenix\|t\.boost\/\.test\(t\)\) return 'Supplement';/.test(appSrc),
   'testosterone branch text changed unexpectedly');
