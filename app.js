@@ -506,6 +506,66 @@ function makeSKU(brand,upc,packs,title){
   return pfx+'-'+upc+'-'+packs+'pk';
 }
 
+// ── VALIDACIÓN GS1 (UPC-A / EAN-13 / GTIN-14) ─────────────────────────────
+// 19 sep 2026 — Investigación #15. Un empleado pegó un URL de eBay para
+// "Status BT One Wireless On Ear Headphone Jet Black"; el listado NO tenía
+// UPC real, pero Product Scanner exportó Product:UPC = 406931053635 — el
+// eBay ITEM ID del listado, no un UPC — porque ese número tiene 12 dígitos
+// y el único chequeo que existía era de LARGO (12-14 dígitos), nunca de
+// dígito de control. eBay rechazó el listado (Error 21919302: "UPC has an
+// invalid value"), y de hecho 406931053635 falla el dígito de control
+// UPC-A (calculado 2, real 5) — la prueba de que nunca fue un UPC real.
+//
+// UPC-A (12), EAN-13 (13) y GTIN-14 (14) — los tres largos que el export ya
+// acepta ("eBay solo acepta UPCs de 12-14 dígitos", ver más abajo) —
+// comparten el MISMO algoritmo GS1 de dígito de control (pesos alternados
+// ×3/×1 desde el dígito más a la derecha, sin contar el dígito de control
+// mismo). Una sola función cubre los tres largos — no se inventa vocabulario
+// nuevo por longitud.
+function psGs1CheckDigit(digitsWithoutCheck) {
+  var sum = 0;
+  var weight = 3; // el dígito más a la derecha (sin contar el de control) pesa ×3
+  for (var i = digitsWithoutCheck.length - 1; i >= 0; i--) {
+    sum += (digitsWithoutCheck.charCodeAt(i) - 48) * weight;
+    weight = (weight === 3) ? 1 : 3;
+  }
+  return (10 - (sum % 10)) % 10;
+}
+
+// Verdadera validación estructural: solo dígitos, largo 12/13/14, Y dígito
+// de control correcto — NO solo "se ve como" un identificador numérico de
+// 12-14 dígitos, que es lo único que se validaba antes de esta investigación.
+// Esto es lo que hace que un eBay Item ID (aunque tenga 12 dígitos) nunca
+// pase como UPC/GTIN real, sin importar de dónde venga el valor.
+function psIsValidGTIN(value) {
+  var s = String(value == null ? '' : value).trim();
+  if (!/^\d+$/.test(s)) return false;
+  if (s.length !== 12 && s.length !== 13 && s.length !== 14) return false;
+  var body = s.substring(0, s.length - 1);
+  var actualCheck = s.charCodeAt(s.length - 1) - 48;
+  return psGs1CheckDigit(body) === actualCheck;
+}
+
+// ── IDENTIFICADOR PARA SKU: separado a propósito de Product:UPC ──────────
+// 19 sep 2026 — Investigación #15. El SKU necesita ALGÚN identificador
+// determinístico para ser único (BRAND-IDENTIFICADOR-Npk); Product:UPC
+// necesita que ese identificador sea un UPC/GTIN REAL o quede vacío. Antes
+// ambos usos leían el mismo campo (cur.upc), así que "arreglar" el SKU vacío
+// (BRAND--1pk) tentaba a rellenar cur.upc con lo que fuera — exactamente el
+// error de esta investigación. Esta función SOLO decide qué usar para el
+// SKU (nunca escribe en upc): prefiere el UPC real si existe; si no, usa el
+// eBay Item ID (cur._ebayItemId) SOLO como identificador interno de SKU —
+// nunca como Product:UPC. cur.upc y Product:UPC siguen su propia validación
+// (psIsValidGTIN) totalmente aparte.
+function psSkuIdentifier(obj) {
+  if (!obj) return 'NOID';
+  var upc = String(obj.upc || '').trim();
+  if (upc) return upc;
+  var itemId = String(obj._ebayItemId || '').trim();
+  if (itemId) return itemId;
+  return 'NOID';
+}
+
 // ── EVIDENCIA REAL de papel toalla, no solo la marca ──────────────────────
 // 18 sep 2026 — Investigación #13. "Bounty" y "Scott" son también marcas de
 // OTROS productos ("Nature's Bounty" vitaminas/suplementos, "Scott" tisú).
@@ -5250,7 +5310,20 @@ async function analyzeEbayUrl(urlStr){
       ebayFull.pricing = { sold: { avg: 0, count: 0 }, active: { low: totalPrice } };
     }
 
-    await finishAnalyze(itemId, prod, ebayFull, step);
+    // ── BUG A (Investigación #15): el eBay Item ID NUNCA es un UPC/GTIN ──
+    // Hoy /api/ebay-item no manda gtin/upc real (eso es una mejora aparte,
+    // NO incluida aquí) — d.upc/d.gtin serán undefined en la práctica, así
+    // que realUpc queda '' y nunca se usa. Se deja la lectura ya lista y
+    // validada con psIsValidGTIN() para que, si el backend algún día empieza
+    // a mandar un GTIN real, el frontend lo use automáticamente sin otro
+    // cambio — pero JAMÁS se usa itemId (el identificador del LISTADO, no
+    // del producto) como si fuera ese valor.
+    const realUpcCandidate = String(d.upc || d.gtin || '').trim();
+    const realUpc = psIsValidGTIN(realUpcCandidate) ? realUpcCandidate : '';
+
+    // itemId viaja SEPARADO, nunca como el argumento "upc" — ver
+    // finishAnalyze()/callClaude() más abajo, que ya no reciben itemId ahí.
+    await finishAnalyze(realUpc, prod, ebayFull, step, itemId);
   } catch(e) {
     console.error('analyzeEbayUrl error:', e);
     renderAnalyzeError(step, e, itemId||urlStr, {name:'',brand:'',found:false}, {found:false});
@@ -5349,7 +5422,7 @@ function _confirmEditLowPrice(){
 
 // ── Shared processing: Claude title/category + verdict + render ──
 // Used by both analyze(upc) [barcode/manual UPC] and analyzeEbayUrl(urlStr) [paste eBay link]
-async function finishAnalyze(upc, prod, ebayFull, stepIn){
+async function finishAnalyze(upc, prod, ebayFull, stepIn, ebayItemId){
   let step = stepIn || 'claude', res = null;
   let ebay = {
     found:          ebayFull.found,
@@ -5379,7 +5452,11 @@ async function finishAnalyze(upc, prod, ebayFull, stepIn){
     if(!res.brand||['generic','desconocida','unknown','n/a'].includes(res.brand.toLowerCase().trim())){
       res.brand = prod.brand||'';
     }
-    if(!res.title||res.title.includes(upc)||res.title.toLowerCase().includes(' upc ')){
+    // 19 sep 2026 — Investigación #15: upc puede venir vacío (URL de eBay
+    // sin UPC real) — String.includes('') es SIEMPRE true en JS, así que
+    // sin el guard `upc &&` esto forzaría buildSmartTitle() en todo
+    // producto de eBay-URL sin motivo real.
+    if(!res.title||(upc && res.title.includes(upc))||res.title.toLowerCase().includes(' upc ')){
       res.title = buildSmartTitle(prod, res.packSize||1) || res.title;
     }
     // ── BACKEND CATEGORY IS AUTHORITATIVE ──────────────────────────────────
@@ -5421,6 +5498,12 @@ async function finishAnalyze(upc, prod, ebayFull, stepIn){
     applyVerdict(res);
 
     cur=res;
+    // 19 sep 2026 — Investigación #15. El eBay Item ID (si el escaneo vino
+    // de pegar un URL de eBay) se guarda SEPARADO de cur.upc — nunca se
+    // asigna a upc/Product:UPC. psSkuIdentifier() lo usa SOLO como
+    // identificador interno de SKU cuando no hay UPC real; el export sigue
+    // validando cur.upc con psIsValidGTIN() sin importar este campo.
+    cur._ebayItemId = ebayItemId || '';
     // Un escaneo real de OTRO producto invalida cualquier "Regresar y
     // corregir" pendiente — nunca debe actualizar la fila equivocada.
     _psReturnToFixUpc = null;
@@ -5872,7 +5955,7 @@ async function _addBulkInternal() {
   var skuEl   = document.getElementById('pack-sku-display');
   var titleEl = document.getElementById('pack-title-display');
   var usedTitle = cur._selectedTitle || (titleEl && titleEl.dataset.val) || rebuildTitle(cur.title||'', packs);
-  var usedSKU   = cur._selectedSKU   || (skuEl   && skuEl.dataset.val)   || makeSKU(cur.brand, cur.upc, packs, cur.title);
+  var usedSKU   = cur._selectedSKU   || (skuEl   && skuEl.dataset.val)   || makeSKU(cur.brand, psSkuIdentifier(cur), packs, cur.title);
   var usedPrice = cur._selectedPrice || parseFloat(cur.price) || 9.99;
   var shade     = (cur._shade   || '').trim();
   var expDate   = cur._expDate  || '';
@@ -6566,7 +6649,7 @@ async function addSplitPacksToCSV(){
 
   for (var i = 0; i < packsToAdd.length; i++) {
     var p = packsToAdd[i];
-    var sku = makeSKU(cur.brand, cur.upc, p, cur.title);
+    var sku = makeSKU(cur.brand, psSkuIdentifier(cur), p, cur.title);
     // Peso total del paquete (unidad × pack + caja) para eBay/ShipStation.
     // getUnitWeightLb() lee las casillas lb/oz. Si no hay peso, queda 0.
     var _unitLb = (typeof getUnitWeightLb === 'function') ? getUnitWeightLb() : 0;
@@ -8781,7 +8864,7 @@ function renderResult(r){
   const low =ebay.prices&&ebay.prices.low||0;
   const avg =ebay.prices&&ebay.prices.avg||0;
   const packs=r.packSize||1;
-  const sku=makeSKU(r.brand,r.upc,packs,r.title);
+  const sku=makeSKU(r.brand,psSkuIdentifier(r),packs,r.title);
   const bundlePrice=calcBundlePrice(ebay,packs);
 
   // ── COMPACT SUMMARY CARD (same structure as Clothing & Shoes "✅ Found!") ──
@@ -9252,7 +9335,7 @@ async function psSendToShopify() {
     }
 
     // SKU del 1pk
-    var sku = makeSKU(cur.brand, cur.upc, 1, cur.title);
+    var sku = makeSKU(cur.brand, psSkuIdentifier(cur), 1, cur.title);
 
     // Título limpio
     var title = rebuildTitle(cur.title || '', 1, cur._shade || '', cur._expDate || '');
@@ -10818,6 +10901,17 @@ async function exportCSV(){
     // UPC para el CSV: preferir it.upc; si no, extraerlo del SKU (BRAND-UPC-Npk).
     // eBay solo acepta UPCs de 12-14 dígitos. Si no hay UPC válido, va vacío
     // (eBay permite "Does not apply" pero preferimos dejarlo vacío que inventar).
+    //
+    // 19 sep 2026 — Investigación #15. Antes este chequeo era SOLO de largo
+    // (12-14 dígitos) — un eBay Item ID de 12 dígitos (nunca un UPC real) lo
+    // pasaba igual, y eBay rechazaba el listado (Error 21919302, "UPC has an
+    // invalid value"). Ahora se exige el dígito de control GS1 real
+    // (psIsValidGTIN — mismo algoritmo para UPC-A/EAN-13/GTIN-14, ver arriba
+    // de makeSKU()). Esto también cierra el fallback de abajo (extraer
+    // dígitos del SKU): aunque el SKU siga usando el eBay Item ID como
+    // identificador INTERNO (psSkuIdentifier(), Investigación #15), esos
+    // dígitos ya no pueden colarse como Product:UPC porque no pasan el
+    // dígito de control.
     var upcVal = '';
     // ── Helper: obtiene el valor de un specific de IA para una columna dada.
     // Recorre cur._specifics del producto y mapea cada nombre a su columna.
@@ -10837,7 +10931,7 @@ async function exportCSV(){
       var _skuDigits = String(it.sku).match(/\d{8,14}/);
       if (_skuDigits) _rawUpc = _skuDigits[0];
     }
-    if (_rawUpc.length >= 12 && _rawUpc.length <= 14) {
+    if (psIsValidGTIN(_rawUpc)) {
       upcVal = _rawUpc;
     }
 
