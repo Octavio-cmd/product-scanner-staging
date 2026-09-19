@@ -7784,6 +7784,54 @@ function psDetectIngestibleForm(title) {
   return '';
 }
 
+// ── FORMA INGERIBLE VÁLIDA — mismo vocabulario que psDetectIngestibleForm() ──
+// 19 sep 2026 — Investigación #14. Nature's Bounty Sleep3 (UPC 074312006951):
+// el título final/canónico nunca menciona "tablet", así que la resolución de
+// Formulation/Item Form (Tier 1/2 en psPreFillSpecifics) no encontraba nada,
+// y la IA quedaba libre para rellenar esos campos con CUALQUIER texto —
+// devolvió "Drug Free" (una afirmación de marketing real del producto, no
+// una forma física) y quedaba armonizado/bloqueado como canónico.
+//
+// Mientras tanto la app ya sabía la forma real: la misma respuesta de la IA
+// normalmente llena Size/Count/Unit Quantity con algo como "28 Tablets" —
+// evidencia que psGetCanonicalUnitCount()/psGetUnitNoun() (multipack-fixes.js)
+// ya usan para la descripción ("28 tablets each"), pero que Formulation/
+// Item Form nunca consultaban.
+//
+// Estas funciones reutilizan el MISMO vocabulario de psDetectIngestibleForm()
+// (Tablet/Capsule/Softgel/Gummy/Powder/Liquid/Drops — ninguno nuevo) para:
+//   1) decidir si un valor propuesto (de la IA o de Tier 1/2) es realmente
+//      una forma física reconocida, y
+//   2) si no lo es, buscar una forma reconocida en la evidencia de
+//      Size/Count/Unit Quantity ya presente en los specifics.
+// Nunca inventan una forma nueva ni aceptan una que no esté en el
+// vocabulario existente — si no encuentran ninguna, el resultado es ''.
+function psFormFromText(text) {
+  return psDetectIngestibleForm(text) || '';
+}
+
+function psFindIngestibleFormInSizeFields(specs) {
+  if (!specs) return '';
+  var countFields = (typeof PS_COUNT_FIELDS !== 'undefined') ? PS_COUNT_FIELDS : ['Size', 'Count', 'Unit Quantity'];
+  for (var i = 0; i < countFields.length; i++) {
+    var v = specs[countFields[i]];
+    if (!v) continue;
+    var found = psFormFromText(String(v));
+    if (found) return found;
+  }
+  return '';
+}
+
+// Forma física válida a usar: si candidateValue YA es una forma reconocida,
+// se conserva (normalizada al vocabulario, ej. "Caplets"->"Tablet"); si no
+// lo es, se busca una forma reconocida en Size/Count/Unit Quantity; si
+// ninguna de las dos existe, devuelve '' (descartar, nunca inventar).
+function psResolveValidIngestibleForm(candidateValue, specs) {
+  var direct = psFormFromText(candidateValue);
+  if (direct) return direct;
+  return psFindIngestibleFormInSizeFields(specs);
+}
+
 // Quita una dosis final tipo "400mg" / "500 mcg" del nombre de un
 // ingrediente (ej. "Magnesium 400mg" → "Magnesium"). La dosis ya tiene su
 // propia columna (C:Dosage); dejarla mezclada en el ingrediente no calza
@@ -7928,6 +7976,19 @@ function psPreFillSpecifics(title, category, brand) {
     // Only Tier 2: use it
     resolvedForm = _tier2Form;
     formSource = 'STRUCTURED_ASPECT_' + (_tier2FormSourceAspect || 'Form');
+  } else {
+    // TIER 3 (NEW) — 19 sep 2026, Investigación #14. Neither the title nor
+    // a structured aspect said anything: before giving up to an
+    // unconstrained AI guess, check canonical Size/Count/Unit Quantity
+    // evidence already locked from a prior generation this session (e.g.
+    // "Regresar y corregir" reopening a product whose Size was already
+    // confirmed as "28 Tablets"). Same vocabulary as Tier 1, no new rules.
+    var _tier3Form = (cur && cur._canonicalSpecifics)
+      ? psFindIngestibleFormInSizeFields(cur._canonicalSpecifics) : '';
+    if (_tier3Form) {
+      resolvedForm = _tier3Form;
+      formSource = 'CANONICAL_SIZE_EVIDENCE';
+    }
   }
 
   // DATA-DRIVEN APPLICABILITY GUARD
@@ -8176,15 +8237,55 @@ function psScrubHealthSpecs(specs, category, title, upc) {
     else delete specs[k];
   });
 
-  // 2) Formulation e Item Form no pueden contradecirse. Gana la que aparezca
-  //    en el título; si ninguna aparece, gana Formulation.
-  var f = String(specs['Formulation'] || '').trim();
-  var itf = String(specs['Item Form'] || '').trim();
+  // 2) Formulation e Item Form deben ser una forma física real reconocida
+  //    (mismo vocabulario que psDetectIngestibleForm()) — no una afirmación
+  //    de marketing ("Drug Free", "Sugar Free", "Gluten Free", "Non-GMO",
+  //    "Non-Habit Forming"...). Antes esta regla solo armonizaba los DOS
+  //    campos ENTRE SÍ sin verificar que el valor acordado fuera real, así
+  //    que "Formulation=Drug Free / Item Form=Tablet" se volvía "Drug Free
+  //    / Drug Free" en vez de "Tablet / Tablet" (UPC 074312006951, Nature's
+  //    Bounty Sleep3 — el título final nunca dice "tablet", así que ninguno
+  //    de los dos valores aparecía ahí y "gana Formulation" por defecto
+  //    clobbeaba el valor correcto). 19 sep 2026 — Investigación #14.
+  var fRaw   = String(specs['Formulation'] || '').trim();
+  var itfRaw = String(specs['Item Form'] || '').trim();
+  var fValid   = psFormFromText(fRaw);
+  var itfValid = psFormFromText(itfRaw);
 
-  if (f && itf && f.toLowerCase() !== itf.toLowerCase()) {
-    var win = (t.indexOf(itf.toLowerCase()) !== -1 && t.indexOf(f.toLowerCase()) === -1) ? itf : f;
+  if (fValid && itfValid) {
+    // Ambos son formas reconocidas. Si concuerdan, se normalizan igual; si
+    // no concuerdan, se preserva el comportamiento existente: gana la que
+    // aparezca en el título, si ninguna aparece gana Formulation — esto
+    // sigue siendo una discrepancia real entre dos formas físicas válidas,
+    // no el bug de esta investigación.
+    var win = (fValid.toLowerCase() === itfValid.toLowerCase())
+      ? fValid
+      : ((t.indexOf(itfValid.toLowerCase()) !== -1 && t.indexOf(fValid.toLowerCase()) === -1) ? itfValid : fValid);
     specs['Formulation'] = win;
     specs['Item Form']   = win;
+  } else if (fValid || itfValid) {
+    // Solo uno de los dos es una forma reconocida — esa SIEMPRE gana, sin
+    // importar cuál de los dos campos la tenía.
+    var known = fValid || itfValid;
+    specs['Formulation'] = known;
+    specs['Item Form']   = known;
+  } else if (fRaw || itfRaw) {
+    // Ninguno de los dos es una forma reconocida. Antes de descartar, buscar
+    // evidencia real en Size/Count/Unit Quantity — la misma respuesta de la
+    // IA suele llenar esos campos con algo como "28 Tablets" aunque haya
+    // fallado en Formulation/Item Form. Si se encuentra, esa es la forma
+    // real. Si no, es más seguro descartar el valor inválido que exportar
+    // una afirmación de marketing como si fuera la forma física del
+    // producto (nunca inventamos un destino nuevo para el valor descartado
+    // — si la IA también lo puso en Features, ahí se queda intacto).
+    var rescued = psFindIngestibleFormInSizeFields(specs);
+    if (rescued) {
+      specs['Formulation'] = rescued;
+      specs['Item Form']   = rescued;
+    } else {
+      delete specs['Formulation'];
+      delete specs['Item Form'];
+    }
   }
 
   // 3) Color inventado en pastillas.
