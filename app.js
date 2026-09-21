@@ -10171,6 +10171,22 @@ async function exportCSV(){
     return typeVal;
   }
 
+  // ── VOCABULARIO COMPARTIDO: ingredientes AMBIGUOS que pueden disparar
+  // 'Supplement' genérico ────────────────────────────────────────────────
+  // 21 sep 2026 — Investigación #17 / Implementación #17. FUENTE ÚNICA para
+  // dos usos que antes vivían como dos listas separadas y se desincronizaron:
+  // (1) qué ingredientes disparan 'Supplement' cuando no hay forma ingerible
+  // explícita, y (2) qué ingredientes cuentan como "ambiguos" para que la
+  // evidencia de forma TÓPICA explícita (Cream/Lotion/Serum/etc., ver
+  // _hasTopicalForm) les gane. Antes _hasAmbiguousIngredient solo reconocía
+  // biotin/collagen/omega-3 mientras esta misma lista de disparo ya incluía
+  // magnesium/melatonin/turmeric/elderberry/ashwagandha/zinc supplement/
+  // calcium supplement/iron supplement/coq10 — así que "Olacluk Magnesium
+  // Repair Cream" (evidencia tópica real: "Cream") no tenía protección y
+  // exportaba C:Type=Supplement. Con una sola fuente, las dos listas no
+  // pueden volver a divergir.
+  var PS_AMBIGUOUS_SUPPLEMENT_INGREDIENTS = /probiotic|omega.?3|fish oil|collagen|biotin|melatonin|turmeric|elderberry|ashwagandha|magnesium|zinc supplement|calcium supplement|iron supplement|coq10/;
+
   // El título describe el producto exacto; la categoría a veces cae al
   // default (Skin Care) y no refleja lo que realmente es. Por eso revisamos
   // el título primero, en orden de más específico a más general.
@@ -10295,7 +10311,10 @@ async function exportCSV(){
     var _hasTopicalForm = /\b(oil|cream|lotion|serum|spray|shampoo|conditioner|mist|gel|mask|leave-?in|treatment)\b/.test(t);
     // _hasIngestibleForm ya se calculó al principio de la función (16 sep
     // 2026, guarda de belleza tópica) — se reutiliza en vez de recalcularla.
-    var _hasAmbiguousIngredient = /\bbiotin\b|\bcollagen\b|omega.?3/.test(t);
+    // 21 sep 2026 — Investigación #17: lee de PS_AMBIGUOUS_SUPPLEMENT_INGREDIENTS
+    // (fuente única, ver arriba de detectType()) en vez de una lista propia
+    // que solo cubría biotin/collagen/omega-3.
+    var _hasAmbiguousIngredient = PS_AMBIGUOUS_SUPPLEMENT_INGREDIENTS.test(t);
     // 18 sep 2026 — Investigación #13. NAT-031604042127-2pk: "Nature Made
     // Multivitamin Omega-3 Gummies..." tiene _hasIngestibleForm=true (dice
     // "gummies") pero _hasTopicalForm=false (no dice oil/cream/lotion/...),
@@ -10309,9 +10328,13 @@ async function exportCSV(){
     // ambiguo genérico. Sin forma explícita ("Omega-3 Supplement") el
     // comportamiento no cambia — sigue devolviendo 'Supplement' igual que
     // antes.
+    // 21 sep 2026 — Investigación #17: el tercer término ahora es
+    // _hasAmbiguousIngredient (misma fuente PS_AMBIGUOUS_SUPPLEMENT_INGREDIENTS
+    // que ya se probó arriba) en vez de repetir el regex — imposible que las
+    // dos listas se desincronicen otra vez porque literalmente son la misma.
     if(!_hasIngestibleForm &&
        !(_hasAmbiguousIngredient && _hasTopicalForm && !_hasIngestibleForm) &&
-       /probiotic|omega.?3|fish oil|collagen|biotin|melatonin|turmeric|elderberry|ashwagandha|magnesium|zinc supplement|calcium supplement|iron supplement|coq10/.test(t)) return 'Supplement';
+       _hasAmbiguousIngredient) return 'Supplement';
     if(/fiber supplement|metamucil|benefiber|psyllium/.test(t)) return 'Fiber Supplement';
     if(/whey protein|protein powder|protein shake|mass gainer/.test(t)) return 'Protein Powder';
     if(/creatine|pre.?workout|bcaa|amino acid/.test(t)) return 'Sports Supplement';

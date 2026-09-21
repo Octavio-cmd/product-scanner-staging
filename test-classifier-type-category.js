@@ -82,6 +82,14 @@ if (!foodTypesMatch || !beautyTypesMatch) throw new Error('PS_FOOD_TYPES / PS_TO
 eval('var PS_FOOD_TYPES = ' + foodTypesMatch[1] + ';');
 eval('var PS_TOPICAL_BEAUTY_TYPES = ' + beautyTypesMatch[1] + ';');
 
+// 21 sep 2026 — Investigación/Implementación #17: detectType() now reads
+// PS_AMBIGUOUS_SUPPLEMENT_INGREDIENTS (shared source for the ambiguous-
+// ingredient topical-protection guard) — extract it too, or detectType()
+// throws ReferenceError on its first call.
+const ambigIngredientsMatch = src.match(/var PS_AMBIGUOUS_SUPPLEMENT_INGREDIENTS = (\/[\s\S]*?\/);/);
+if (!ambigIngredientsMatch) throw new Error('PS_AMBIGUOUS_SUPPLEMENT_INGREDIENTS not found');
+eval('var PS_AMBIGUOUS_SUPPLEMENT_INGREDIENTS = ' + ambigIngredientsMatch[1] + ';');
+
 // 18 sep 2026 — Investigación #13: catId() (both occurrences) and
 // detectType() now call the shared psIsPaperTowelTitle() helper instead of
 // their own inline regex — extract it too, or catId()/detectType() throw

@@ -110,6 +110,11 @@ eval('var PS_FOOD_TYPES = ' + foodTypesMatch[1] + ';');
 eval('var PS_TOPICAL_BEAUTY_TYPES = ' + beautyTypesMatch[1] + ';');
 const ingestFormTypesMatch = src.match(/var PS_INGESTIBLE_FORM_TYPES = (\[[^\]]*\]);/);
 eval('var PS_INGESTIBLE_FORM_TYPES = ' + ingestFormTypesMatch[1] + ';');
+// 21 sep 2026 — Investigación/Implementación #17: detectType() now reads
+// PS_AMBIGUOUS_SUPPLEMENT_INGREDIENTS — extract it too.
+const ambigIngredientsMatch = src.match(/var PS_AMBIGUOUS_SUPPLEMENT_INGREDIENTS = (\/[\s\S]*?\/);/);
+if (!ambigIngredientsMatch) throw new Error('PS_AMBIGUOUS_SUPPLEMENT_INGREDIENTS not found');
+eval('var PS_AMBIGUOUS_SUPPLEMENT_INGREDIENTS = ' + ambigIngredientsMatch[1] + ';');
 eval(extractVar('CAT_TYPE', false));
 
 eval(extractFn('psDetectIngestibleForm'));

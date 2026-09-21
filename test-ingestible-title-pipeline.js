@@ -165,6 +165,11 @@ const foodTypesMatch = appSrc.match(/var PS_FOOD_TYPES = (\[[\s\S]*?\]);/);
 const beautyTypesMatch = appSrc.match(/var PS_TOPICAL_BEAUTY_TYPES = (\[[^\]]*\]);/);
 eval('var PS_FOOD_TYPES = ' + foodTypesMatch[1] + ';');
 eval('var PS_TOPICAL_BEAUTY_TYPES = ' + beautyTypesMatch[1] + ';');
+// 21 sep 2026 — Investigación/Implementación #17: detectType() now reads
+// PS_AMBIGUOUS_SUPPLEMENT_INGREDIENTS — extract it too.
+const ambigIngredientsMatch = appSrc.match(/var PS_AMBIGUOUS_SUPPLEMENT_INGREDIENTS = (\/[\s\S]*?\/);/);
+if (!ambigIngredientsMatch) throw new Error('PS_AMBIGUOUS_SUPPLEMENT_INGREDIENTS not found');
+eval('var PS_AMBIGUOUS_SUPPLEMENT_INGREDIENTS = ' + ambigIngredientsMatch[1] + ';');
 // 18 sep 2026 — Investigación #13: catId() and detectType() now call the
 // shared psIsPaperTowelTitle() helper — extract it too, or they throw
 // ReferenceError when evaluated standalone like this.

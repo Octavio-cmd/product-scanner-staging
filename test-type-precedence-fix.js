@@ -154,6 +154,11 @@ const foodTypesMatch = appSrc.match(/var PS_FOOD_TYPES = (\[[\s\S]*?\]);/);
 const beautyTypesMatch = appSrc.match(/var PS_TOPICAL_BEAUTY_TYPES = (\[[^\]]*\]);/);
 eval('var PS_FOOD_TYPES = ' + foodTypesMatch[1] + ';');
 eval('var PS_TOPICAL_BEAUTY_TYPES = ' + beautyTypesMatch[1] + ';');
+// 21 sep 2026 — Investigación/Implementación #17: detectType() now reads
+// PS_AMBIGUOUS_SUPPLEMENT_INGREDIENTS — extract it too.
+const ambigIngredientsMatch = appSrc.match(/var PS_AMBIGUOUS_SUPPLEMENT_INGREDIENTS = (\/[\s\S]*?\/);/);
+if (!ambigIngredientsMatch) throw new Error('PS_AMBIGUOUS_SUPPLEMENT_INGREDIENTS not found');
+eval('var PS_AMBIGUOUS_SUPPLEMENT_INGREDIENTS = ' + ambigIngredientsMatch[1] + ';');
 eval(extractFn('catId'));
 eval(extractFn('detectType'));
 eval(extractFn('psTypeCategoryPlausible'));
@@ -321,8 +326,17 @@ checkTrue('8.2 generic vitamin|supplement branch gated by !_hasIngestibleForm',
 // Supplement instead of Gummy), so it is no longer "left unchanged": it now
 // also carries the standalone !_hasIngestibleForm guard, same pattern as
 // 8.1/8.2 above.
+//
+// 21 sep 2026 — Investigación/Implementación #17: the third AND-term used to
+// repeat the ingredient regex literal (`/probiotic|.../.test(t)`) inline;
+// it now reads _hasAmbiguousIngredient directly (computed earlier from the
+// shared PS_AMBIGUOUS_SUPPLEMENT_INGREDIENTS source), so the two ingredient
+// lists can never diverge again (see test-ambiguous-topical-ingredients.js
+// #20 for the functional proof). The structural pattern below was updated
+// to match — the guard itself (!_hasIngestibleForm gating this whole
+// branch) is unchanged.
 checkTrue('8.3 ambiguous-ingredient Supplement branch now ALSO gated by !_hasIngestibleForm (Investigación #13)',
-  /if\(!_hasIngestibleForm &&\s*\n\s*!\(_hasAmbiguousIngredient && _hasTopicalForm && !_hasIngestibleForm\) &&\s*\n\s*\/probiotic/.test(appSrc),
+  /if\(!_hasIngestibleForm &&\s*\n\s*!\(_hasAmbiguousIngredient && _hasTopicalForm && !_hasIngestibleForm\) &&\s*\n\s*_hasAmbiguousIngredient\) return 'Supplement';/.test(appSrc),
   'ambiguous-ingredient branch missing the new !_hasIngestibleForm guard');
 checkTrue('8.4 testosterone booster Supplement branch left UNCHANGED',
   /if\(\/testosterone booster\|test booster\|nugenix\|t\.boost\/\.test\(t\)\) return 'Supplement';/.test(appSrc),
