@@ -337,12 +337,15 @@ section('12 — DIFFERENT-PACK = WARNING ONLY (never excluded, still reaches CSV
   check('no 2pk row generated', skus.indexOf('IRW-710363598525-2pk'), -1);
 }
 
-section('13 — MANUAL RE-INCLUDE PRESERVED (legacy SKU)');
+section('13 — EXISTING PACK CANNOT BE RE-INCLUDED (legacy SKU) — rule changed by #21');
 {
+  // Until #21 an employee could re-include an existing pack with "↩ incluir".
+  // Implementación #21: an existing pack is hard-locked (inventory update
+  // instead of a new Add), so toggleSplitPack() must refuse to activate it.
   await scan(IRW_UPC, 'Irwin Naturals', [prod('IRW-710363598525-2', 1)], ALL_ON);
   check('2 excluded after scan', getSplitActive()[2], false);
   sandbox.toggleSplitPack(2);
-  check('toggleSplitPack(2) re-includes pack 2', getSplitActive()[2], true);
+  check('toggleSplitPack(2) refuses: pack 2 stays excluded (hard lock, #21)', getSplitActive()[2], false);
 }
 
 section('14 — updateSplitCalc() DOES NOT REACTIVATE EXCLUDED PACKS');
@@ -395,17 +398,17 @@ checkTrue('old PK-only regex removed from psCheckSellbrite',
 section('18 — PRICING UNCHANGED');
 check('calcBundlePrice() byte-identical to base 53b5994', sha(fnSource(appSrc, 'calcBundlePrice')), 'd56265fdf8c804e4');
 check('computeSplit() byte-identical to base', sha(fnSource(appSrc, 'computeSplit')), 'b729a2b0e1211f1a');
-check('addSplitPacksToCSV() byte-identical to base', sha(fnSource(appSrc, 'addSplitPacksToCSV')), '83da9fd221c58ef5');
-check('updateSplitCalc() byte-identical to base', sha(fnSource(appSrc, 'updateSplitCalc')), '2db0a5bc890a3021');
+check('addSplitPacksToCSV() fingerprint (#21 lock gate added; pricing checked below)', sha(fnSource(appSrc, 'addSplitPacksToCSV')), '469a5d0802931a09');
+check('updateSplitCalc() fingerprint (#21 locked pack cards)', sha(fnSource(appSrc, 'updateSplitCalc')), '153ed75fd91fa6a8');
 {
   const row = getBulk().find(b => b.sku === 'IRW-710363598525-1pk');
   check('IRW 1pk price from section 12 = (low 20 * 1 * 0.88).toFixed(2), same formula as #9', row && row.price, (20 * 1 * 0.88).toFixed(2));
 }
 
 section('19 — CSV GENERATION UNCHANGED');
-check('exportCSV() byte-identical to base 53b5994', sha(fnSource(appSrc, 'exportCSV')), '3b2558c7421eb3fd');
+check('exportCSV() fingerprint (#21 final lock gate; CSV output compared in test-existing-pack-lock-inventory.js)', sha(fnSource(appSrc, 'exportCSV')), 'ac8f3636516d82b0');
 check('makeSKU() byte-identical to base', sha(fnSource(appSrc, 'makeSKU')), 'a9b61f94bc5cbbeb');
-check('toggleSplitPack() byte-identical to base', sha(fnSource(appSrc, 'toggleSplitPack')), '3ac3e89b406a5c22');
+check('toggleSplitPack() fingerprint (#21 refuses locked packs)', sha(fnSource(appSrc, 'toggleSplitPack')), '2405e19b21d78b2d');
 
 section('20 — EUC INTENTIONALLY NOT SOLVED / NOT BLOCKED');
 {

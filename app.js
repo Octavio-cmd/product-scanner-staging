@@ -5961,6 +5961,12 @@ async function _addBulkInternal() {
   var expDate   = cur._expDate  || '';
   var location  = cur.location  || '';
 
+  // #21: un pack que ya existe no se agrega como listado nuevo.
+  if (psIsPackLocked(cur.upc, packs) && !psLockSessionEditAllowed(cur.upc, usedSKU)) {
+    toast('🔒 ' + packs + 'pk ya existe en Sellbrite/eBay — no se agrega. Actualiza su inventario en el Bulk Split.');
+    return;
+  }
+
   // 16 sep 2026 — el bloqueo de UPC duplicado se queda igual en el flujo
   // normal. Pero cuando _psReturnToFixUpc está activo para ESTE upc exacto
   // (el empleado volvió explícitamente a corregir una fila ya existente,
@@ -6400,7 +6406,11 @@ function updateSplitCalc(){
   const out = $('split-results');
   if (!out) return;
   if (total <= 0) {
-    out.innerHTML = '<div style="color:var(--mu);font-size:12px">Ingresa el total de unidades para ver el reparto sugerido.</div>';
+    // #21: los packs que ya existen se ven (con su inventario) aunque aún
+    // no se haya escrito el total de unidades.
+    var _lockedHtml = '';
+    PACK_SIZES.forEach(function(p){ var _s = psPackState(p); if (_s.locked) _lockedHtml += psLockedPackCardHtml(_s); });
+    out.innerHTML = _lockedHtml + '<div style="color:var(--mu);font-size:12px">Ingresa el total de unidades para ver el reparto sugerido.</div>';
     return;
   }
 
@@ -6411,6 +6421,14 @@ function updateSplitCalc(){
   let rows = '';
   PACK_SIZES.forEach(function(p){
     const d = split[p];
+    // #21: un pack que ya existe se muestra como tarjeta bloqueada (sin
+    // "↩ incluir" y sin cantidad de listados nuevos).
+    const _st = psPackState(p);
+    if (_st.locked && !psLockSessionEditAllowed(cur && cur.upc, makeSKU(cur && cur.brand, cur ? psSkuIdentifier(cur) : '', p, cur && cur.title))) {
+      rows += psLockedPackCardHtml(_st);
+      return;
+    }
+    const _badge = psPackBadgeHtml(_st);
     const isOn = !!active[p];
     const inSb = !!(window._psSbExisting && window._psSbExisting[p]);
     // Peso y envío estimado de este pack (solo si hay peso de unidad)
@@ -6439,7 +6457,7 @@ function updateSplitCalc(){
           </div>
           <button onclick="toggleSplitPack(${p})" ontouchend="event.preventDefault();toggleSplitPack(${p})" style="background:rgba(231,76,60,.15);border:1px solid rgba(231,76,60,.5);border-radius:8px;padding:5px 10px;color:#e74c3c;font-size:13px;font-weight:800;cursor:pointer">✕</button>
         </div>
-        ${shipTag}
+        ${shipTag}${_badge}
       </div>`;
     } else {
       const exTxt = inSb ? '<span style="color:var(--sv);font-weight:700">✅ Ya en Sellbrite</span>' : 'excluido';
@@ -6447,7 +6465,7 @@ function updateSplitCalc(){
         <div style="font-weight:800;text-decoration:line-through">${p}pk</div>
         <div style="color:var(--mu);font-size:12px">${exTxt}</div>
         <button onclick="toggleSplitPack(${p})" ontouchend="event.preventDefault();toggleSplitPack(${p})" style="background:rgba(0,230,118,.12);border:1px solid rgba(0,230,118,.4);border-radius:8px;padding:5px 10px;color:var(--sv);font-size:12px;font-weight:800;cursor:pointer;margin-left:8px">↩ incluir</button>
-      </div>`;
+      </div>${_badge}`;
     }
   });
   // Footer dinámico con IDs para actualización en tiempo real
@@ -6477,6 +6495,11 @@ function updateSplitCalc(){
 // ── Excluir / incluir un pack del reparto ──────────────────────────────
 function toggleSplitPack(p){
   if (!window._splitActive) window._splitActive = {1:true,2:false,3:true,4:false,5:false,6:true,7:false,8:false,9:false,10:false,11:false,12:true};
+  // #21: un pack que ya existe nunca se vuelve a activar como listado nuevo.
+  if (!window._splitActive[p] && psIsPackLocked(cur && cur.upc, p)) {
+    toast('🔒 ' + p + 'pk ya existe — actualiza su inventario, no se crea otro listado');
+    return;
+  }
   window._splitActive[p] = !window._splitActive[p];
   // Limpiar ajuste manual del pack que se excluyó
   if (!window._splitActive[p] && window._splitManual) delete window._splitManual[p];
@@ -6550,7 +6573,20 @@ async function addSplitPacksToCSV(){
   var _targetReplacedThisRun = false;
   // ── P0-A FIX: Pack selection must be based on user's active selection alone, not on quantity calculation.
   // User explicitly selecting a pack size should ALWAYS generate a CSV row, even if initial quantity is low.
-  var packsToAdd = PACK_SIZES.filter(function(p){ return active[p]; });
+  // #21: la verificación de bloqueo manda, aunque _splitActive diga true.
+  var _lockedSkipped = [];
+  var packsToAdd = PACK_SIZES.filter(function(p){
+    if (!active[p]) return false;
+    if (psIsPackLocked(cur.upc, p) && !psLockSessionEditAllowed(cur.upc, makeSKU(cur.brand, psSkuIdentifier(cur), p, cur.title))) {
+      _lockedSkipped.push(p + 'pk');
+      return false;
+    }
+    return true;
+  });
+  if (_lockedSkipped.length) {
+    toast('🔒 Ya existen, no se agregan: ' + _lockedSkipped.join(', '));
+    if (!packsToAdd.length) return true;   // nada que agregar — no caer al Add de un solo pack
+  }
 
   // ── ZERO QUANTITY VALIDATION: Block CSV export if any selected pack has Quantity <= 0
   // This prevents exporting invalid eBay CSVs while keeping selected packs recognized
@@ -7015,14 +7051,181 @@ async function psCheckEbaySellerListings(upc, brand, title){
   if (state !== 'ok') {
     window._psEbSeller = { upc: upcClean, state: 'error', listings: [], error: String(error) };
     psRenderExistingProductWarning();
+    try { updateSplitCalc(); } catch(e) {}
     return;
   }
   var ebExisting = {};
-  listings.forEach(function(l){ if (l.pack != null && PACK_SIZES.indexOf(l.pack) !== -1) ebExisting[l.pack] = true; });
+  // #21: solo un listado VIVO confirma el pack. Completed/Ended solo avisa.
+  listings.forEach(function(l){ if (l.pack != null && PACK_SIZES.indexOf(l.pack) !== -1 && psEbStatusIsLive(l.listing_status)) ebExisting[l.pack] = true; });
   window._psEbExisting = ebExisting;
   window._psEbSeller = { upc: upcClean, state: 'ok', listings: listings, error: '' };
   psAutoExcludeConfirmedPacks(ebExisting, upcClean, 'eBay');
   psRenderExistingProductWarning();
+  psRefreshPackLocks(upcClean);
+}
+
+// ━━ BLOQUEO DE PACKS EXISTENTES + INVENTARIO (Implementación #21) ━━━━━━━━
+// Regla: un pack que YA existe (Sellbrite, o un listado VIVO en eBay) nunca
+// puede volver a salir como Action=Add. Si existe en Sellbrite, el empleado
+// actualiza su inventario con el flujo de siempre (/sb/update-inventory,
+// SUMAR/REEMPLAZAR) — Sellbrite es el camino de inventario; eBay no se toca.
+//
+// psPackState(p) se DERIVA de la evidencia que ya existe (fase 1 y fase 2);
+// no hay otra consulta ni otra fuente de verdad. window._psLockedPacks
+// guarda, por UPC, los packs confirmados en esta sesión (y en localStorage)
+// para que exportCSV() pueda rechazar filas viejas restauradas.
+window._psSbState = { upc: '', state: 'idle' };
+window._psLockedPacks = window._psLockedPacks || null;
+var PS_LOCKED_PACKS_KEY = 'ps_locked_packs_v1';
+var PS_LOCK_TTL_MS = 24 * 60 * 60 * 1000;
+
+// Completed / Ended / Inactive = histórico (no vivo). Active o cualquier
+// estado desconocido = vivo (bloqueo conservador).
+function psEbStatusIsLive(status){
+  var s = String(status || '').trim().toLowerCase();
+  return !(s === 'completed' || s === 'ended' || s === 'inactive');
+}
+
+// Índice de la tarjeta de Sellbrite (_psSellbriteProducts) con ESE SKU
+// exacto — el SKU que devolvió Sellbrite, nunca uno reconstruido.
+function psSbProductIdxForSku(sku){
+  var prods = (typeof _psSellbriteProducts !== 'undefined' && _psSellbriteProducts) || {};
+  var want = String(sku || '').trim();
+  for (var k in prods) { if (prods[k] && String(prods[k].sku || '').trim() === want) return Number(k); }
+  var wantU = want.toUpperCase();
+  for (var k2 in prods) { if (prods[k2] && String(prods[k2].sku || '').trim().toUpperCase() === wantU) return Number(k2); }
+  return null;
+}
+
+function psPackState(pack){
+  var sbS = window._psSbState || {};
+  var ebS = window._psEbSeller || {};
+  var sb = (window._psSbExistingListings || []).filter(function(l){ return l.pack === pack; }).map(function(l){
+    return { sku: l.sku, qty: l.qty, idx: psSbProductIdxForSku(l.sku) };
+  });
+  var eb = (ebS.state === 'ok' ? (ebS.listings || []) : []).filter(function(l){ return l.pack === pack; }).map(function(l){
+    return { item_id: l.item_id, sku: l.sku, status: l.listing_status, available: l.quantity_available, live: psEbStatusIsLive(l.listing_status) };
+  });
+  var ebLive = eb.filter(function(l){ return l.live; });
+  var state = sb.length ? 'sellbrite' : (ebLive.length ? 'ebay' : 'new');
+  return {
+    pack: pack, state: state, locked: state !== 'new',
+    sellbrite: sb, ebay: eb,
+    historical: eb.filter(function(l){ return !l.live; }),
+    sbStatus: sbS.state || 'idle', ebStatus: ebS.state || 'idle',
+    unconfirmed: state === 'new' && (sbS.state === 'error' || ebS.state === 'error')
+  };
+}
+
+function psLoadLockedPacks(){
+  if (window._psLockedPacks) return window._psLockedPacks;
+  var rec = {};
+  try { rec = JSON.parse(localStorage.getItem(PS_LOCKED_PACKS_KEY) || '{}') || {}; } catch(e) { rec = {}; }
+  window._psLockedPacks = rec;
+  return rec;
+}
+
+// Registra los packs confirmados para este UPC, POR FUENTE. Una búsqueda
+// que respondió bien reemplaza lo que esa fuente había confirmado (si un
+// SKU ya no existe, deja de bloquear); una que falló no toca nada.
+function psRecordLockedPacks(upcClean){
+  if (!upcClean) return;
+  var rec = psLoadLockedPacks();
+  var sbOk = (window._psSbState || {}).state === 'ok' && (window._psSbState || {}).upc === upcClean;
+  var ebOk = (window._psEbSeller || {}).state === 'ok' && (window._psEbSeller || {}).upc === upcClean;
+  if (!sbOk && !ebOk) return;
+  var now = Date.now();
+  var u = rec[upcClean] = rec[upcClean] || {};
+  PACK_SIZES.forEach(function(pn){
+    var st = psPackState(pn);
+    var e = u[pn] || {};
+    if (sbOk) { if (st.sellbrite.length) e.sb = now; else delete e.sb; }
+    if (ebOk) { if (st.ebay.some(function(x){ return x.live; })) e.eb = now; else delete e.eb; }
+    if (e.sb || e.eb) u[pn] = e; else delete u[pn];
+  });
+  if (!Object.keys(u).length) delete rec[upcClean];
+  try { localStorage.setItem(PS_LOCKED_PACKS_KEY, JSON.stringify(rec)); } catch(e) {}
+}
+
+// ÚNICA verificación de bloqueo — la usan las 3 rutas de Add.
+function psIsPackLocked(upc, pack){
+  var u = String(upc || '').replace(/\D/g, '');
+  var n = parseInt(pack, 10);
+  if (!u || !n) return false;
+  var rec = psLoadLockedPacks();
+  var e = rec[u] && rec[u][n];
+  // Cada fuente vale 24 h; un nuevo escaneo la vuelve a confirmar.
+  var now = Date.now();
+  return !!(e && ((e.sb && now - e.sb < PS_LOCK_TTL_MS) || (e.eb && now - e.eb < PS_LOCK_TTL_MS)));
+}
+
+// Excepción de "Regresar y corregir": corregir una fila que YA está en la
+// sesión de CSV (no crea un Add nuevo).
+function psLockSessionEditAllowed(upc, sku){
+  var u = String(upc || '').replace(/\D/g, '');
+  if (!_psReturnToFixUpc || String(_psReturnToFixUpc).replace(/\D/g, '') !== u) return false;
+  if (!_psReturnToFixSku || _psReturnToFixSku !== sku) return false;
+  return (typeof bulk !== 'undefined' && bulk || []).some(function(r){ return r && r.sku === sku; });
+}
+
+function psRefreshPackLocks(upcClean){
+  var cu = (typeof cur !== 'undefined' && cur && cur.upc) ? String(cur.upc).replace(/\D/g, '') : '';
+  if (cu && upcClean && cu !== upcClean) return;   // evidencia de otro producto
+  psRecordLockedPacks(upcClean);
+  try { updateSplitCalc(); } catch(e) {}
+}
+
+// Tarjeta de un pack bloqueado dentro del Bulk Split.
+function psLockedPackCardHtml(st){
+  var p = st.pack;
+  var ebLines = st.ebay.map(function(l){
+    return '<div style="font-size:11px;color:var(--mu)">eBay · Item ' + esc(l.item_id) + ' · <span style="font-family:monospace">' + esc(l.sku) + '</span> · '
+      + esc(l.status || 'desconocido') + ' · Available ' + (l.available != null ? l.available : '¿?') + '</div>';
+  }).join('');
+  var body = '';
+  if (st.state === 'sellbrite') {
+    if (st.sellbrite.length > 1) body += '<div style="font-size:11px;color:#ffb300;font-weight:700">' + st.sellbrite.length + ' registros en Sellbrite — elige cuál actualizar</div>';
+    st.sellbrite.forEach(function(r){
+      var i = r.idx;
+      var ok = i != null && !(typeof _psSbInvVacio !== 'undefined' && _psSbInvVacio && _psSbInvVacio[i]);
+      body += '<div style="margin-top:6px;padding:6px;border:1px solid var(--bd);border-radius:8px">'
+        + '<div style="font-size:12px">Sellbrite: <span style="font-family:monospace">' + esc(r.sku) + '</span> · Qty actual: <strong id="ps-pack-sbavail-' + i + '">' + (r.qty != null ? r.qty : '¿?') + '</strong></div>';
+      if (ok) {
+        body += '<div style="display:flex;align-items:center;gap:6px;margin-top:6px"><span style="font-size:11px;color:var(--mu)">Cantidad recibida</span>'
+          + '<button onclick="psAdjustSbQty(\'ps-pack-sbqty-' + i + '\',-1)" style="width:30px;height:30px;background:var(--sf2);border:1px solid var(--bd);border-radius:8px;color:var(--tx)">−</button>'
+          + '<input id="ps-pack-sbqty-' + i + '" type="number" inputmode="numeric" value="0" style="width:60px;background:var(--sf2);border:1px solid var(--bd);border-radius:8px;padding:6px;color:var(--tx);text-align:center">'
+          + '<button onclick="psAdjustSbQty(\'ps-pack-sbqty-' + i + '\',1)" style="width:30px;height:30px;background:var(--sf2);border:1px solid var(--bd);border-radius:8px;color:var(--tx)">+</button></div>'
+          + '<div style="display:flex;gap:6px;margin-top:6px">'
+          + '<button id="ps-pack-sbadd-' + i + '" onclick="psUpdateSellbriteInventory(' + i + ',\'add\',\'pack\')" style="flex:1;padding:8px;background:linear-gradient(135deg,#00c853,#00963f);border:none;border-radius:8px;color:#fff;font-weight:800">➕ SUMAR</button>'
+          + '<button id="ps-pack-sbset-' + i + '" onclick="psUpdateSellbriteInventory(' + i + ',\'set\',\'pack\')" style="flex:1;padding:8px;background:var(--sf2);border:1px solid var(--bd);border-radius:8px;color:var(--tx);font-weight:800">🔄 REEMPLAZAR</button></div>'
+          + '<div id="ps-pack-sbconfirm-' + i + '" style="margin-top:4px;font-size:11px;text-align:center"></div>';
+      } else {
+        body += '<div style="font-size:11px;color:#ff5252">🛑 Sellbrite no devolvió el inventario de este SKU — actualízalo directo en Sellbrite.</div>';
+      }
+      body += '</div>';
+    });
+    body += ebLines;
+  } else {
+    body += ebLines
+      + '<div style="margin-top:6px;font-size:12px;color:#ffb300">⏳ Ya existe en eBay. Todavía no está sincronizado con Sellbrite.<br>'
+      + '<span style="font-size:11px;color:var(--mu)">Actualiza/importa eBay en Sellbrite para habilitar inventario.</span></div>'
+      + '<button disabled style="margin-top:6px;width:100%;padding:8px;background:var(--sf2);border:1px solid var(--bd);border-radius:8px;color:var(--mu);opacity:.6">Inventario deshabilitado</button>';
+  }
+  var head = st.state === 'sellbrite' ? '🔒 YA LISTADO' : '🔒 YA EXISTE EN EBAY';
+  return '<div id="ps-pack-lock-' + p + '" data-pack-state="' + st.state + '" style="padding:9px 0;border-bottom:1px solid var(--bd)">'
+    + '<div style="display:flex;justify-content:space-between;align-items:center"><div style="font-weight:800">' + p + 'pk</div>'
+    + '<div style="font-size:12px;font-weight:800;color:#ff9800">' + head + '</div></div>'
+    + body + '</div>';
+}
+
+// Etiqueta para packs NO bloqueados (A / D / sin confirmar).
+function psPackBadgeHtml(st){
+  if (st.historical.length) {
+    return '<div style="font-size:11px;color:#ffb300;margin-top:2px">⚠ eBay: ' + st.historical.map(function(l){ return esc(l.status) + ' (Item ' + esc(l.item_id) + ')'; }).join(', ') + ' — no bloquea</div>';
+  }
+  if (st.unconfirmed) return '<div style="font-size:11px;color:#ffb300;margin-top:2px">⚠️ Sin confirmar — una búsqueda no respondió (no se sabe si es nuevo)</div>';
+  if (st.sbStatus === 'ok' && st.ebStatus === 'ok') return '<div style="font-size:11px;color:var(--sv);margin-top:2px">🟢 NUEVO</div>';
+  return '';
 }
 
 // ── SELLBRITE + SHIPSTATION — ¿ya existe este producto? ¿dónde está? ──
@@ -7036,6 +7239,7 @@ async function psCheckSellbrite(upc, brand){
   // Implementación #20B: una respuesta tardía de un escaneo anterior no debe
   // pintar ni excluir nada en el producto actual.
   var sbSeq = ++_psSbSeq;
+  window._psSbState = { upc: String(upc || '').replace(/\D/g,''), state: 'loading' };
   // RAILWAY_SB URLs now use SAVVY_API for staging
   try{
     const upcClean = String(upc).replace(/\D/g,'');
@@ -7052,6 +7256,7 @@ async function psCheckSellbrite(upc, brand){
     }
     const data = await res.json();
     if (sbSeq !== _psSbSeq) return;
+    window._psSbState = { upc: upcClean, state: 'ok' };
 
     if(res.status === 404 || data.status === 'not_found' || !data.products || !data.products.length){
       // No está en Sellbrite — consultar ShipStation por UPC de todas formas
@@ -7059,6 +7264,7 @@ async function psCheckSellbrite(upc, brand){
       statusEl.innerHTML = '<div id="ps-existing-product-slot">' + psCombinedExistingWarningHtml() + '</div>'
         + '🆕 <strong style="color:#ff9800">No existe en Sellbrite todavía</strong><br><span id="ps-ss-upc-status" style="font-size:12px;color:var(--mu)">🔍 Consultando ShipStation...</span>';
       psRenderExistingProductWarning();
+      psRefreshPackLocks(upcClean);
       try {
         const ssRes = await psAuthFetch('/ss/location' + '?upc=' + encodeURIComponent(upcClean));
         const ssData = await ssRes.json();
@@ -7209,7 +7415,7 @@ async function psCheckSellbrite(upc, brand){
         + '<span id="ps-ssloc-' + idx + '" style="display:block;font-size:11px;color:var(--mu);margin:4px 0">📍 Consultando ShipStation...</span>'
         + '<div style="display:flex;align-items:center;gap:6px;margin-top:6px">'
         + '<button onclick="psAdjustSbQty(\'' + inputId + '\',-1)" style="width:32px;height:32px;background:var(--sf2);border:1px solid var(--bd);border-radius:8px;color:var(--tx);font-size:18px;cursor:pointer">−</button>'
-        + '<input id="' + inputId + '" type="number" inputmode="numeric" value="' + totalOnHand + '" style="flex:1;min-width:0;background:var(--sf2);border:1px solid var(--bd);border-radius:8px;padding:8px;color:var(--tx);font-size:15px;text-align:center">'
+        + '<input id="' + inputId + '" type="number" inputmode="numeric" value="0" style="flex:1;min-width:0;background:var(--sf2);border:1px solid var(--bd);border-radius:8px;padding:8px;color:var(--tx);font-size:15px;text-align:center">'
         + '<button onclick="psAdjustSbQty(\'' + inputId + '\',1)" style="width:32px;height:32px;background:var(--sf2);border:1px solid var(--bd);border-radius:8px;color:var(--tx);font-size:18px;cursor:pointer">+</button>'
         + '</div>'
         + '<div style="display:flex;gap:6px;margin-top:6px">'
@@ -7222,6 +7428,7 @@ async function psCheckSellbrite(upc, brand){
     });
     statusEl.innerHTML = html;
     psRenderExistingProductWarning();
+    psRefreshPackLocks(upcClean);
 
     // Consultar la ubicación en ShipStation para cada SKU encontrado (en paralelo)
     products.forEach(function(p, idx){ psCheckShipStationLocation(p.sku, idx); });
@@ -7237,9 +7444,11 @@ async function psCheckSellbrite(upc, brand){
     console.error('psCheckSellbrite error:', errDetail);
     if (window._psDebug) window._psDebug('❌ psCheckSellbrite falló: ' + errDetail);
     if (sbSeq !== _psSbSeq) return;
+    window._psSbState = { upc: String(upc || '').replace(/\D/g,''), state: 'error' };
     statusEl.innerHTML = '<div id="ps-existing-product-slot">' + psCombinedExistingWarningHtml() + '</div>'
       + '<span style="color:var(--mu)">⚠️ No se pudo consultar Sellbrite (' + esc(errDetail) + ')</span>';
     psRenderExistingProductWarning();
+    try { updateSplitCalc(); } catch(e) {}
   }
 }
 
@@ -7454,13 +7663,16 @@ function psAdjustSbQty(inputId, delta){
   input.value = Math.max(0, val);
 }
 
-async function psUpdateSellbriteInventory(idx, modo){
+async function psUpdateSellbriteInventory(idx, modo, where){
   console.log('✅ psUpdateSellbriteInventory llamado, idx=' + idx);
   const p = (_psSellbriteProducts || {})[idx];
-  const confirmEl = $('ps-sbqty-confirm-' + idx);
-  const btnEl = $('ps-sbqty-btn-' + idx);
+  // #21: where === 'pack' → controles de la tarjeta del pack en Bulk Split
+  // (mismo SKU de Sellbrite, mismo endpoint, mismos modos).
+  const inPack = where === 'pack';
+  const confirmEl = $(inPack ? 'ps-pack-sbconfirm-' + idx : 'ps-sbqty-confirm-' + idx);
+  const btnEl = $(inPack ? (modo === 'add' ? 'ps-pack-sbadd-' : 'ps-pack-sbset-') + idx : 'ps-sbqty-btn-' + idx);
   if(!p){ console.error('❌ No hay producto guardado en _psSellbriteProducts[' + idx + ']'); toast('⚠️ No se cargó el producto'); return; }
-  const input = $(p.inputId);
+  const input = $(inPack ? 'ps-pack-sbqty-' + idx : p.inputId);
   const newQty = parseInt((input && input.value) || '0', 10);
   // RAILWAY_SB URLs now use SAVVY_API for staging
 
@@ -7512,7 +7724,7 @@ async function psUpdateSellbriteInventory(idx, modo){
     const result = await res.json();
     console.log('📥 Body:', JSON.stringify(result));
     if(!res.ok || result.status === 'error'){
-      throw new Error(result.error || ('HTTP ' + res.status));
+      throw new Error(result.message || result.error || ('HTTP ' + res.status));
     }
     // ── Confirmación con la OPERACIÓN completa ────────────────────────
     // El total lo calcula y confirma el backend (result.available), no la
@@ -7520,7 +7732,13 @@ async function psUpdateSellbriteInventory(idx, modo){
     // Sellbrite, no sobre el que estaba en pantalla. Entre que se cargó la
     // tarjeta y se presionó el botón pudo haberse vendido algo.
     var _antes = (result.previous_available != null) ? result.previous_available : '?';
-    var _final = (result.available != null) ? result.available : newQty;
+    // #21: solo el valor que confirma el backend — nunca uno calculado aquí.
+    var _final = (result.available != null) ? result.available : '?';
+    if (result.available != null) {
+      (window._psSbExistingListings || []).forEach(function(l){ if (l.sku === p.sku) l.qty = result.available; });
+    }
+    var packAvail = $('ps-pack-sbavail-' + idx);
+    if (packAvail) packAvail.textContent = _final;
     var _op = (result.mode === 'add')
       ? (_antes + ' + ' + newQty + ' = <strong>' + _final + '</strong>')
       : ('<strong>' + _final + '</strong> (reemplazado, antes ' + _antes + ')');
@@ -7537,7 +7755,7 @@ async function psUpdateSellbriteInventory(idx, modo){
     if(confirmEl) confirmEl.innerHTML = '<span style="color:#ff5252;font-weight:700">❌ No se pudo actualizar: ' + esc(err.message||String(err)) + '</span>';
     toast('❌ Error al actualizar: ' + (err.message||err));
   }finally{
-    if(btnEl){ btnEl.disabled = false; btnEl.textContent = '➕ Sumar'; }
+    if(btnEl){ btnEl.disabled = false; btnEl.textContent = inPack ? (modo === 'add' ? '➕ SUMAR' : '🔄 REEMPLAZAR') : '➕ Sumar'; }
   }
 }
 
@@ -10236,6 +10454,19 @@ window.psReturnAndFixExpDate = psReturnAndFixExpDate;
 async function exportCSV(){
   try {
   if(!bulk.length){toast('⚠️ No products');return;}
+
+  // #21: última barrera — ninguna fila de un pack que YA existe sale como
+  // Add, aunque venga de la sesión guardada o de un estado de UI viejo.
+  var _lockedRows = bulk.filter(function(it){
+    var pk = parseInt(it && it.packs, 10) || psParseSellbritePack(it && it.sku, it && it.upc);
+    return psIsPackLocked(it && it.upc, pk);
+  });
+  if (_lockedRows.length) {
+    var _lk = _lockedRows.map(function(it){ return it.sku; }).join(', ');
+    toast('🔒 Export bloqueado: ' + _lk + ' ya existe(n) en Sellbrite/eBay. Quítalo(s) del CSV y actualiza su inventario.', 6000);
+    alert('🔒 EXPORT BLOQUEADO\n\nEstos packs ya existen (Sellbrite o eBay) y no pueden salir como listado nuevo (Add):\n\n' + _lockedRows.map(function(it){ return it.sku; }).join('\n') + '\n\nQuítalos del CSV y actualiza su inventario en el Bulk Split.');
+    return;
+  }
 
   // Candado anti doble-tap: evita exports (y filas) duplicados
   if (window._exportLock) { toast('⏳ Export en proceso...'); return; }

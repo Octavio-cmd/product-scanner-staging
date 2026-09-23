@@ -302,11 +302,13 @@ section('13 — different pack = warning only');
 check('pack 1,2,3,6,12 untouched while eBay has only 5', [1, 2, 3, 6, 12].map(p => act()[p]), [true, true, true, true, true]);
 checkTrue('warning explains other packs are not blocked', /NO se bloquean/.test(slot()) && /otro pack/.test(slot()));
 
-section('14 — manual re-include preserved');
+section('14 — existing pack cannot be re-included — rule changed by #21');
+// Until #21 an eBay-confirmed pack could be re-included by hand.
+// Implementación #21: a live eBay listing hard-locks the pack.
 sandbox.toggleSplitPack(5);
-check('toggleSplitPack(5) re-includes', act()[5], true);
+check('toggleSplitPack(5) refuses (hard lock, #21)', act()[5], false);
 sandbox.updateSplitCalc();
-check('updateSplitCalc does not re-exclude', act()[5], true);
+check('updateSplitCalc keeps it excluded', act()[5], false);
 
 section('15 — Return-to-Fix: late Sellbrite response');
 {
@@ -423,13 +425,13 @@ section('26 — Phase-1 behavior unchanged when eBay was never queried');
     for (let j = src.indexOf('{', m.index); j < src.length; j++) { if (src[j] === '{') d++; else if (src[j] === '}') { d--; if (!d) return src.slice(m.index, j + 1); } }
   }
   const sha = s => crypto.createHash('sha256').update(s).digest('hex').slice(0, 16);
-  check('exportCSV unchanged', sha(fnSource(appSrc, 'exportCSV')), '3b2558c7421eb3fd');
+  check('exportCSV fingerprint (#21 gate)', sha(fnSource(appSrc, 'exportCSV')), 'ac8f3636516d82b0');
   check('calcBundlePrice unchanged', sha(fnSource(appSrc, 'calcBundlePrice')), 'd56265fdf8c804e4');
-  check('addSplitPacksToCSV unchanged', sha(fnSource(appSrc, 'addSplitPacksToCSV')), '83da9fd221c58ef5');
-  check('updateSplitCalc unchanged', sha(fnSource(appSrc, 'updateSplitCalc')), '2db0a5bc890a3021');
+  check('addSplitPacksToCSV fingerprint (#21 gate)', sha(fnSource(appSrc, 'addSplitPacksToCSV')), '469a5d0802931a09');
+  check('updateSplitCalc fingerprint (#21 cards)', sha(fnSource(appSrc, 'updateSplitCalc')), '153ed75fd91fa6a8');
   check('computeSplit unchanged', sha(fnSource(appSrc, 'computeSplit')), 'b729a2b0e1211f1a');
   check('makeSKU unchanged', sha(fnSource(appSrc, 'makeSKU')), 'a9b61f94bc5cbbeb');
-  check('toggleSplitPack unchanged', sha(fnSource(appSrc, 'toggleSplitPack')), '3ac3e89b406a5c22');
+  check('toggleSplitPack fingerprint (#21 refuses locked)', sha(fnSource(appSrc, 'toggleSplitPack')), '2405e19b21d78b2d');
 }
 
 section('SUMMARY');
