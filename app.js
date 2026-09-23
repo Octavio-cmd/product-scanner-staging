@@ -6830,7 +6830,7 @@ function psSellbriteQty(p){
 // NO se bloquea: IRW/NAT mostraron que eBay puede rechazar otro pack del
 // mismo UPC (21919067), pero EUC falló sin match por UPC, así que la
 // coincidencia por UPC no explica toda la regla de eBay todavía.
-function psExistingProductWarningHtml(listings){
+function psExistingProductWarningHtml(listings, footNote){
   if (!listings || !listings.length) return '';
   var allZero = listings.every(function(l){ return l.qty === 0; });
   var head = allZero ? '⚠ SIN STOCK EN SELLBRITE / EXISTING PRODUCT FOUND' : '⚠ EXISTING PRODUCT FOUND';
@@ -6844,8 +6844,185 @@ function psExistingProductWarningHtml(listings){
     + '<div style="font-size:12px;margin-top:2px">Este UPC ya tiene ' + listings.length + ' listado' + (listings.length > 1 ? 's' : '') + ' en Sellbrite:</div>'
     + rows
     + '<div style="font-size:12px;margin-top:6px;color:#ffb74d">Posible duplicado en eBay: eBay puede rechazar otro listado del mismo producto (error 21919067), aunque sea otro pack. Los packs que ya existen se excluyen; los demás NO se bloquean — revisa en eBay antes de exportar.</div>'
-    + '<div style="font-size:11px;margin-top:4px;color:var(--mu)">Datos de Sellbrite solamente — no se consultó el estado en eBay.</div>'
+    + '<div style="font-size:11px;margin-top:4px;color:var(--mu)">' + (footNote || 'Datos de Sellbrite solamente — no se consultó el estado en eBay.') + '</div>'
     + '</div>';
+}
+
+// ── LISTADOS PROPIOS EN EBAY (Implementación #20B, fase 2) ──────────────
+// Complementa a Sellbrite (fase 1), no lo reemplaza. Consulta el endpoint
+// de SOLO LECTURA /ebay/seller-listings (Trading API en el backend). Casos
+// reales que Sellbrite no veía: EUC-072140041298-5pk (Active, 1) y
+// SOL-033984023192-2pk (Active, 2) — eBay rechazó / marcó como duplicado
+// el siguiente Add.
+//
+// Estado propio, separado de Sellbrite (procedencia explícita):
+//   window._psEbSeller   = { upc, state, listings, error }
+//                          state: idle | loading | ok | error
+//   window._psEbExisting = { pack: true } — packs confirmados por eBay
+// Un fallo (502/503/red) es "error", NUNCA "no existe": no excluye nada.
+var _psEbSellerSeq = 0;
+var _psSbSeq = 0;
+window._psEbSeller = { upc: '', state: 'idle', listings: [], error: '' };
+window._psEbExisting = {};
+
+// Mismo prefijo que makeSKU() — se reutiliza la función, no se duplica.
+function psSkuPrefixFor(brand, upc, title){
+  return String(makeSKU(brand, upc, 1, title || '')).split('-')[0];
+}
+
+// Agrupa Sellbrite + eBay por pack (o por SKU si el pack no se reconoce),
+// para que el mismo pack no aparezca como dos productos distintos.
+function psExistingGroups(sbListings, ebListings){
+  var groups = {}, order = [];
+  function g(pack, sku){
+    var k = pack != null ? 'P' + pack : 'S' + String(sku || '').trim().toUpperCase();
+    if (!groups[k]) { groups[k] = { pack: pack, skus: [], sb: [], eb: [] }; order.push(k); }
+    var su = String(sku || '').trim();
+    if (su && groups[k].skus.map(function(x){ return x.toUpperCase(); }).indexOf(su.toUpperCase()) === -1) groups[k].skus.push(su);
+    return groups[k];
+  }
+  (sbListings || []).forEach(function(l){ g(l.pack, l.sku).sb.push(l); });
+  (ebListings || []).forEach(function(l){ g(l.pack, l.sku).eb.push(l); });
+  return order.map(function(k){ return groups[k]; }).sort(function(a, b){
+    if (a.pack == null && b.pack == null) return 0;
+    if (a.pack == null) return 1;
+    if (b.pack == null) return -1;
+    return a.pack - b.pack;
+  });
+}
+
+function psCombinedExistingWarningHtml(){
+  var sb = window._psSbExistingListings || [];
+  var ebs = window._psEbSeller || {};
+  var eb = ebs.state === 'ok' ? (ebs.listings || []) : [];
+  var ebNote = '';
+  if (ebs.state === 'loading') ebNote = '🔍 Consultando listados propios en eBay...';
+  else if (ebs.state === 'ok' && !eb.length) ebNote = '✅ No existing seller-owned eBay listing found (listados propios en eBay: ninguno).';
+  else if (ebs.state === 'error') ebNote = '⚠️ eBay seller lookup unavailable — no se pudo consultar eBay. Esto NO confirma que el producto sea nuevo.';
+  var noteHtml = ebNote ? '<div id="ps-eb-seller-note" style="font-size:11px;margin-top:4px;color:var(--mu)">' + ebNote + '</div>' : '';
+
+  if (!eb.length) {
+    // Solo Sellbrite (o nada): exactamente el aviso de la fase 1.
+    if (!sb.length) return noteHtml;
+    return psExistingProductWarningHtml(sb) + noteHtml;
+  }
+
+  var rows = psExistingGroups(sb, eb).map(function(gr){
+    var h = '<div style="margin-top:6px;padding-top:4px;border-top:1px solid rgba(255,152,0,.25);font-size:12px">'
+      + '<strong>Pack: ' + (gr.pack != null ? gr.pack : '¿?') + '</strong> · SKU: <span style="font-family:monospace">' + gr.skus.map(esc).join(' / ') + '</span>';
+    gr.sb.forEach(function(l){
+      h += '<div style="margin-left:8px">SELLBRITE · ' + (gr.skus.length > 1 ? '<span style="font-family:monospace">' + esc(l.sku) + '</span> · ' : '')
+        + 'Sellbrite Qty: ' + (l.qty != null ? l.qty : 'desconocida') + '</div>';
+    });
+    gr.eb.forEach(function(l){
+      h += '<div style="margin-left:8px">EBAY · Item ID: <span style="font-family:monospace">' + esc(l.item_id) + '</span>'
+        + (gr.skus.length > 1 ? ' · <span style="font-family:monospace">' + esc(l.sku) + '</span>' : '')
+        + ' · Status: ' + esc(l.listing_status || 'desconocido')
+        + ' · Available: ' + (l.quantity_available != null ? l.quantity_available : '¿?') + '</div>';
+    });
+    return h + '</div>';
+  }).join('');
+
+  var partes = [];
+  if (sb.length) partes.push('SELLBRITE ' + sb.length);
+  partes.push('EBAY ' + eb.length);
+  return '<div id="ps-existing-product-warning" style="margin-bottom:8px;padding:10px;border-radius:8px;background:rgba(255,152,0,.12);border:1px solid rgba(255,152,0,.6)">'
+    + '<div style="font-weight:900;color:#ff9800">⚠ EXISTING PRODUCT FOUND</div>'
+    + '<div style="font-size:12px;margin-top:2px">Este UPC ya tiene listados: ' + partes.join(' · ') + '</div>'
+    + rows
+    + '<div style="font-size:12px;margin-top:6px;color:#ffb74d">Posible duplicado en eBay: eBay puede rechazar otro listado del mismo producto (error 21919067), aunque sea otro pack. Los packs que ya existen se excluyen; los demás NO se bloquean — revisa en eBay antes de exportar.</div>'
+    + '<div style="font-size:11px;margin-top:4px;color:var(--mu)">Fuentes: ' + (sb.length ? 'Sellbrite + ' : '') + 'eBay (listados propios, solo lectura).</div>'
+    + '</div>';
+}
+
+function psRenderExistingProductWarning(){
+  var slot = $('ps-existing-product-slot');
+  if (slot) slot.innerHTML = psCombinedExistingWarningHtml();
+}
+
+// Excluye del Bulk Split los packs confirmados — mismas reglas que
+// Sellbrite: nunca durante "Regresar y corregir" de este mismo UPC
+// (Investigación #5); el empleado puede volver a incluirlos a mano.
+function psAutoExcludeConfirmedPacks(existing, upcClean, label){
+  var inRtf = !!(_psReturnToFixUpc && String(_psReturnToFixUpc).replace(/\D/g,'') === upcClean);
+  if (inRtf) { try { updateSplitCalc(); } catch(e) {} return []; }
+  if (!window._splitActive) window._splitActive = {1:true,2:false,3:true,4:false,5:false,6:true,7:false,8:false,9:false,10:false,11:false,12:true};
+  var excluded = [];
+  PACK_SIZES.forEach(function(pn){
+    if (existing[pn] && window._splitActive[pn]) {
+      window._splitActive[pn] = false;
+      excluded.push(pn + 'pk');
+    }
+  });
+  if (excluded.length) {
+    toast('✅ Ya en ' + label + ': ' + excluded.join(', ') + ' — excluidos del reparto');
+    try { updateSplitCalc(); } catch(e) {}
+  }
+  return excluded;
+}
+
+async function psCheckEbaySellerListings(upc, brand, title){
+  var upcClean = String(upc || '').replace(/\D/g, '');
+  var seq = ++_psEbSellerSeq;
+  window._psEbExisting = {};
+  window._psEbSeller = { upc: upcClean, state: 'loading', listings: [], error: '' };
+  psRenderExistingProductWarning();
+  if (!upcClean) {
+    window._psEbSeller = { upc: upcClean, state: 'error', listings: [], error: 'invalid_upc' };
+    psRenderExistingProductWarning();
+    return;
+  }
+  // Respuesta tardía de otro escaneo: se descarta sin tocar nada.
+  function stale(){
+    if (seq !== _psEbSellerSeq) return true;
+    var cu = (typeof cur !== 'undefined' && cur && cur.upc) ? String(cur.upc).replace(/\D/g, '') : '';
+    return !!(cu && cu !== upcClean);
+  }
+  var state = 'error', listings = [], error = '';
+  try {
+    var ctrl = new AbortController();
+    var timer = setTimeout(function(){ ctrl.abort(); }, 15000);
+    var res = await psAuthFetch('/ebay/seller-listings?upc=' + encodeURIComponent(upcClean)
+      + '&prefix=' + encodeURIComponent(psSkuPrefixFor(brand, upcClean, title)), { signal: ctrl.signal });
+    clearTimeout(timer);
+    var data = null;
+    try { data = await res.json(); } catch(e) { data = null; }
+    if (res.ok && data && data.status === 'success' && Array.isArray(data.listings)) {
+      state = 'ok';
+      var seen = {};
+      data.listings.forEach(function(l){
+        var sku = String((l && l.sku) || '');
+        var id = String((l && l.item_id) || '');
+        var bySku = psSkuHasUpc(sku, upcClean);
+        var byGtin = !!(l && l.upc) && String(l.upc).replace(/\D/g, '').replace(/^0+/, '') === upcClean.replace(/^0+/, '');
+        if (!id || seen[id] || !(bySku || byGtin)) return;   // nunca por título/marca
+        seen[id] = true;
+        listings.push({
+          source: 'ebay', item_id: id, sku: sku, title: String(l.title || ''),
+          pack: bySku ? psParseSellbritePack(sku, upcClean) : null,
+          listing_status: String(l.listing_status || ''),
+          quantity: l.quantity, quantity_sold: l.quantity_sold,
+          quantity_available: l.quantity_available
+        });
+      });
+    } else {
+      error = (data && data.error) || ('http_' + res.status);
+    }
+  } catch(err) {
+    error = (err && err.name === 'AbortError') ? 'timeout' : ((err && (err.code || err.message)) || 'network');
+  }
+  if (stale()) return;
+  if (state !== 'ok') {
+    window._psEbSeller = { upc: upcClean, state: 'error', listings: [], error: String(error) };
+    psRenderExistingProductWarning();
+    return;
+  }
+  var ebExisting = {};
+  listings.forEach(function(l){ if (l.pack != null && PACK_SIZES.indexOf(l.pack) !== -1) ebExisting[l.pack] = true; });
+  window._psEbExisting = ebExisting;
+  window._psEbSeller = { upc: upcClean, state: 'ok', listings: listings, error: '' };
+  psAutoExcludeConfirmedPacks(ebExisting, upcClean, 'eBay');
+  psRenderExistingProductWarning();
 }
 
 // ── SELLBRITE + SHIPSTATION — ¿ya existe este producto? ¿dónde está? ──
@@ -6856,6 +7033,9 @@ async function psCheckSellbrite(upc, brand){
   if(!statusEl) return;
   window._psSbExisting = {}; // limpiar estado del producto anterior
   window._psSbExistingListings = [];
+  // Implementación #20B: una respuesta tardía de un escaneo anterior no debe
+  // pintar ni excluir nada en el producto actual.
+  var sbSeq = ++_psSbSeq;
   // RAILWAY_SB URLs now use SAVVY_API for staging
   try{
     const upcClean = String(upc).replace(/\D/g,'');
@@ -6871,10 +7051,14 @@ async function psCheckSellbrite(upc, brand){
       throw new Error('HTTP ' + res.status + ' del backend Sellbrite');
     }
     const data = await res.json();
+    if (sbSeq !== _psSbSeq) return;
 
     if(res.status === 404 || data.status === 'not_found' || !data.products || !data.products.length){
       // No está en Sellbrite — consultar ShipStation por UPC de todas formas
-      statusEl.innerHTML = '🆕 <strong style="color:#ff9800">No existe en Sellbrite todavía</strong><br><span id="ps-ss-upc-status" style="font-size:12px;color:var(--mu)">🔍 Consultando ShipStation...</span>';
+      // (el aviso de eBay, si lo hay, se sigue mostrando arriba — fase 2).
+      statusEl.innerHTML = '<div id="ps-existing-product-slot">' + psCombinedExistingWarningHtml() + '</div>'
+        + '🆕 <strong style="color:#ff9800">No existe en Sellbrite todavía</strong><br><span id="ps-ss-upc-status" style="font-size:12px;color:var(--mu)">🔍 Consultando ShipStation...</span>';
+      psRenderExistingProductWarning();
       try {
         const ssRes = await psAuthFetch('/ss/location' + '?upc=' + encodeURIComponent(upcClean));
         const ssData = await ssRes.json();
@@ -6975,7 +7159,8 @@ async function psCheckSellbrite(upc, brand){
     _psSbInvVacio = {};        // marca los SKU cuyo inventario vino vacío
     // Aviso de producto existente (Implementación #19) — también durante
     // "Regresar y corregir": es solo informativo, no toca _splitActive.
-    let html = psExistingProductWarningHtml(sbListings)
+    // #20B: el aviso combina Sellbrite + eBay (listados propios).
+    let html = '<div id="ps-existing-product-slot">' + psCombinedExistingWarningHtml() + '</div>'
       + '📦 <strong style="color:#00e676">En Sellbrite: ' + products.length + ' listado' + (products.length>1?'s':'') + '</strong>';
     products.forEach(function(p, idx){
       const inv = p.inventory || {};
@@ -7036,6 +7221,7 @@ async function psCheckSellbrite(upc, brand){
         + '</div>';
     });
     statusEl.innerHTML = html;
+    psRenderExistingProductWarning();
 
     // Consultar la ubicación en ShipStation para cada SKU encontrado (en paralelo)
     products.forEach(function(p, idx){ psCheckShipStationLocation(p.sku, idx); });
@@ -7050,7 +7236,10 @@ async function psCheckSellbrite(upc, brand){
       : String(err);
     console.error('psCheckSellbrite error:', errDetail);
     if (window._psDebug) window._psDebug('❌ psCheckSellbrite falló: ' + errDetail);
-    statusEl.innerHTML = '<span style="color:var(--mu)">⚠️ No se pudo consultar Sellbrite (' + esc(errDetail) + ')</span>';
+    if (sbSeq !== _psSbSeq) return;
+    statusEl.innerHTML = '<div id="ps-existing-product-slot">' + psCombinedExistingWarningHtml() + '</div>'
+      + '<span style="color:var(--mu)">⚠️ No se pudo consultar Sellbrite (' + esc(errDetail) + ')</span>';
+    psRenderExistingProductWarning();
   }
 }
 
@@ -8952,9 +9141,13 @@ function renderResult(r){
       ` : '<div style="color:var(--mu)">💰 Sin precio disponible — toca "eBay Lowest" abajo para ingresarlo manual</div>'}
       <div style="margin-top:4px">🗂️ <strong>Category:</strong> ${esc(r.categoryName||'Other')}</div>
       <div style="margin-top:4px">🔖 <strong>SKU:</strong> <span style="font-family:monospace;color:var(--ac)">${esc(sku)}</span></div>
-      <div id="ps-sellbrite-status" style="margin-top:8px;padding-top:8px;border-top:1px solid rgba(255,255,255,.1);font-size:12px;color:var(--mu)">🔍 Buscando en Sellbrite...</div>`;
+      <div id="ps-sellbrite-status" style="margin-top:8px;padding-top:8px;border-top:1px solid rgba(255,255,255,.1);font-size:12px;color:var(--mu)"><div id="ps-existing-product-slot"></div>🔍 Buscando en Sellbrite...</div>`;
     bcResult.style.display = 'block';
-    if (r.upc) psCheckSellbrite(r.upc, r.brand);
+    // Sellbrite (fase 1) y listados propios en eBay (fase 2) en paralelo.
+    if (r.upc) {
+      psCheckSellbrite(r.upc, r.brand);
+      psCheckEbaySellerListings(r.upc, r.brand, r.title);
+    }
   }
 
   // ── VER PRECIO REAL EN eBay + MARKET DATA — juntos, debajo del scanner ──
@@ -9270,9 +9463,10 @@ function renderResult(r){
     if (!_psRestoringSnapshot) {
       window._splitActive = {1:true,2:false,3:true,4:false,5:false,6:true,7:false,8:false,9:false,10:false,11:false,12:true};
       window._splitManual = {}; // limpiar ajustes manuales del producto anterior
-      // Respetar packs ya detectados en Sellbrite (auto-excluidos)
+      // Respetar packs ya detectados en Sellbrite o en eBay (auto-excluidos)
       var _sbEx = window._psSbExisting || {};
-      PACK_SIZES.forEach(function(pn){ if (_sbEx[pn]) window._splitActive[pn] = false; });
+      var _ebEx = window._psEbExisting || {};
+      PACK_SIZES.forEach(function(pn){ if (_sbEx[pn] || _ebEx[pn]) window._splitActive[pn] = false; });
       updateSplitCalc();
     }
     if(cur && cur._packImages) renderPackImagesPreview();
