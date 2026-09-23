@@ -6794,6 +6794,60 @@ function cycleSplitTier(){
 }
 
 
+// ── IDENTIDAD UPC + PACK DE UN SKU DE SELLBRITE ─────────────────────────
+// 23 sep 2026 — Implementación #19 (fase 1). Antes el pack se leía solo con
+// /-(\d+)\s*PK$/, así que un SKU antiguo como "IRW-710363598525-2" (sin
+// "pk") nunca se reconocía como pack 2, y la identidad se revisaba con un
+// simple indexOf(upc). Ahora hay UN solo parser para ambos formatos:
+//   PREFIJO-UPC-2pk / PREFIJO-UPC-2PK (actual)   PREFIJO-UPC-2 (antiguo)
+// El UPC tiene que aparecer completo (sin dígitos pegados a los lados) y
+// el pack tiene que ser lo ÚLTIMO del SKU, justo después de "UPC-". Así un
+// dígito dentro del UPC o un sufijo raro nunca se toma como pack.
+function psSkuHasUpc(sku, upc){
+  var u = String(upc || '').replace(/\D/g, '');
+  if (!u) return false;
+  return new RegExp('(^|\\D)' + u + '(\\D|$)').test(String(sku || '').toUpperCase());
+}
+// Devuelve el pack (solo tamaños de PACK_SIZES) o null si el SKU no
+// termina en "UPC-N" / "UPC-Npk" para ESTE UPC.
+function psParseSellbritePack(sku, upc){
+  var u = String(upc || '').replace(/\D/g, '');
+  if (!u) return null;
+  var m = String(sku || '').trim().toUpperCase().match(new RegExp('(?:^|\\D)' + u + '-([1-9]\\d?)\\s*(?:PK)?$'));
+  if (!m) return null;
+  var pn = parseInt(m[1], 10);
+  return PACK_SIZES.indexOf(pn) !== -1 ? pn : null;
+}
+// Cantidad real de Sellbrite si el backend la trajo; null = desconocida.
+function psSellbriteQty(p){
+  var inv = (p && p.inventory) || {};
+  if (typeof inv.total_quantity === 'number') return inv.total_quantity;
+  if (inv.found || inv.source === 'sin_inventario') return Number(inv.total_quantity) || 0;
+  return null;
+}
+// Aviso "producto ya existe" — SOLO datos de Sellbrite; no dice nada del
+// estado en eBay porque en esta fase no lo consultamos. Un pack distinto
+// NO se bloquea: IRW/NAT mostraron que eBay puede rechazar otro pack del
+// mismo UPC (21919067), pero EUC falló sin match por UPC, así que la
+// coincidencia por UPC no explica toda la regla de eBay todavía.
+function psExistingProductWarningHtml(listings){
+  if (!listings || !listings.length) return '';
+  var allZero = listings.every(function(l){ return l.qty === 0; });
+  var head = allZero ? '⚠ SIN STOCK EN SELLBRITE / EXISTING PRODUCT FOUND' : '⚠ EXISTING PRODUCT FOUND';
+  var rows = listings.map(function(l){
+    return '<div style="margin-top:4px;font-size:12px">SKU: <span style="font-family:monospace">' + esc(l.sku) + '</span>'
+      + ' · Pack: ' + (l.pack != null ? l.pack : '¿?')
+      + ' · Sellbrite Qty: ' + (l.qty != null ? l.qty : 'desconocida') + '</div>';
+  }).join('');
+  return '<div id="ps-existing-product-warning" style="margin-bottom:8px;padding:10px;border-radius:8px;background:rgba(255,152,0,.12);border:1px solid rgba(255,152,0,.6)">'
+    + '<div style="font-weight:900;color:#ff9800">' + head + '</div>'
+    + '<div style="font-size:12px;margin-top:2px">Este UPC ya tiene ' + listings.length + ' listado' + (listings.length > 1 ? 's' : '') + ' en Sellbrite:</div>'
+    + rows
+    + '<div style="font-size:12px;margin-top:6px;color:#ffb74d">Posible duplicado en eBay: eBay puede rechazar otro listado del mismo producto (error 21919067), aunque sea otro pack. Los packs que ya existen se excluyen; los demás NO se bloquean — revisa en eBay antes de exportar.</div>'
+    + '<div style="font-size:11px;margin-top:4px;color:var(--mu)">Datos de Sellbrite solamente — no se consultó el estado en eBay.</div>'
+    + '</div>';
+}
+
 // ── SELLBRITE + SHIPSTATION — ¿ya existe este producto? ¿dónde está? ──
 // Portado del módulo Inventory Manager (mismo Railway backend, endpoints
 // /sb/search y /ss/location).
@@ -6801,6 +6855,7 @@ async function psCheckSellbrite(upc, brand){
   const statusEl = $('ps-sellbrite-status');
   if(!statusEl) return;
   window._psSbExisting = {}; // limpiar estado del producto anterior
+  window._psSbExistingListings = [];
   // RAILWAY_SB URLs now use SAVVY_API for staging
   try{
     const upcClean = String(upc).replace(/\D/g,'');
@@ -6855,15 +6910,28 @@ async function psCheckSellbrite(upc, brand){
     // perfectamente formado. PACK_SIZES ya es la fuente de verdad que usa
     // el resto de Bulk Split (parseIntoSpans, computeSplit, etc.) — se
     // reutiliza aquí en vez de mantener una segunda lista aparte.
+    //
+    // 23 sep 2026 — Implementación #19: psParseSellbritePack() reconoce
+    // también el formato antiguo sin "pk" (IRW-UPC-2) y exige el UPC
+    // completo justo antes del pack. Además se arma la lista de TODOS los
+    // listados del mismo UPC (con o sin pack reconocible) para el aviso.
     var sbExisting = {};
+    var sbListings = [];
+    var _seenSku = {};
     products.forEach(function(p){
-      var m = String(p.sku || '').toUpperCase().match(/-(\d+)\s*PK$/);
-      if (m && String(p.sku || '').indexOf(upcClean) >= 0) {
-        var pn = parseInt(m[1], 10);
+      var skuStr = String(p.sku || '');
+      if (!psSkuHasUpc(skuStr, upcClean)) return;
+      var pn = psParseSellbritePack(skuStr, upcClean);
+      if (pn != null) {
         if (PACK_SIZES.indexOf(pn) !== -1) sbExisting[pn] = true;
       }
+      var key = skuStr.trim().toUpperCase();
+      if (_seenSku[key]) return;
+      _seenSku[key] = true;
+      sbListings.push({ sku: skuStr, pack: pn, qty: psSellbriteQty(p) });
     });
     window._psSbExisting = sbExisting;
+    window._psSbExistingListings = sbListings;
     if (!window._splitActive) window._splitActive = {1:true,2:false,3:true,4:false,5:false,6:true,7:false,8:false,9:false,10:false,11:false,12:true};
 
     // 17 sep 2026 — Investigación #5. psCheckSellbrite() corre en CADA
@@ -6905,7 +6973,10 @@ async function psCheckSellbrite(upc, brand){
     }
     _psSellbriteProducts = {}; // guardar info para el update por SKU
     _psSbInvVacio = {};        // marca los SKU cuyo inventario vino vacío
-    let html = '📦 <strong style="color:#00e676">En Sellbrite: ' + products.length + ' listado' + (products.length>1?'s':'') + '</strong>';
+    // Aviso de producto existente (Implementación #19) — también durante
+    // "Regresar y corregir": es solo informativo, no toca _splitActive.
+    let html = psExistingProductWarningHtml(sbListings)
+      + '📦 <strong style="color:#00e676">En Sellbrite: ' + products.length + ' listado' + (products.length>1?'s':'') + '</strong>';
     products.forEach(function(p, idx){
       const inv = p.inventory || {};
       const totalQty = inv.total_quantity || 0;
