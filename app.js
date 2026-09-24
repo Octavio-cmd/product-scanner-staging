@@ -7358,9 +7358,13 @@ function psRenderSbRecord(sku){
   if (el) {
     var prev = $('ps-pack-sbconfirm-' + i);
     var keep = prev ? prev.innerHTML : '';
+    var prevLoc = $('ps-ssloc-confirm-' + i);
+    var keepLoc = prevLoc ? prevLoc.innerHTML : '';
     el.innerHTML = psSbRecordInnerHtml(sku, i);
     var now = $('ps-pack-sbconfirm-' + i);
     if (now && keep) now.innerHTML = keep;
+    var nowLoc = $('ps-ssloc-confirm-' + i);
+    if (nowLoc && keepLoc) nowLoc.innerHTML = keepLoc;
   }
   // #21D: la tarjeta de producto de arriba muestra el mismo estado.
   var card = $('ps-sbcard-inv-' + i);
@@ -7401,6 +7405,9 @@ function psSbRecordInnerHtml(sku, i){
     + '<button' + dis + ' id="ps-pack-sbadd-' + i + '" onclick="psUpdateSellbriteInventory(' + i + ',\'add\',\'pack\')" style="flex:1;padding:8px;background:linear-gradient(135deg,#00c853,#00963f);border:none;border-radius:8px;color:#fff;font-weight:800' + dim + '">➕ SUMAR</button>'
     + '<button' + dis + ' id="ps-pack-sbset-' + i + '" onclick="psUpdateSellbriteInventory(' + i + ',\'set\',\'pack\')" style="flex:1;padding:8px;background:var(--sf2);border:1px solid var(--bd);border-radius:8px;color:var(--tx);font-weight:800' + dim + '">🔄 REEMPLAZAR</button></div>'
     + '<div id="ps-pack-sbconfirm-' + i + '" style="margin-top:4px;font-size:11px;text-align:center"></div>';
+  // #21F: ubicaciones del MISMO SKU exacto, con el editor de siempre.
+  h += '<div style="margin-top:8px;padding-top:6px;border-top:1px dashed var(--bd);font-size:11px;color:var(--mu)">'
+    + '<div id="ps-ssloc-' + i + '">' + psSsLocEditorHtml(sku, i) + '</div></div>';
   return h;
 }
 
@@ -7458,6 +7465,7 @@ async function psCheckSellbrite(upc, brand){
   window._psSbExisting = {}; // limpiar estado del producto anterior
   window._psSbExistingListings = [];
   window._psSbInv = {};       // #21C: inventario confirmado por SKU exacto
+  window._psSsLoc = {};       // #21F: ubicaciones (ShipStation) por SKU exacto
   // Implementación #20B: una respuesta tardía de un escaneo anterior no debe
   // pintar ni excluir nada en el producto actual.
   var sbSeq = ++_psSbSeq;
@@ -7639,7 +7647,11 @@ async function psCheckSellbrite(upc, brand){
       html += '<div style="margin-top:8px;padding:8px;background:var(--sf);border-radius:8px;border-left:2px solid var(--bd)">'
         + '<div><span style="font-family:monospace;color:var(--ac)">' + esc(p.sku||'—') + '</span>'
         + '</div>'
-        + '<span id="ps-ssloc-' + idx + '" style="display:block;font-size:11px;color:var(--mu);margin:4px 0">📍 Consultando ShipStation...</span>'
+        // #21F: si el SKU tiene tarjeta 🔒, el editor de ubicaciones vive SOLO
+        // ahí; aquí queda un resumen de solo lectura.
+        + (psSbSkuHasLockCard(p.sku)
+            ? '<span id="ps-ssloc-ro-' + idx + '" style="display:block;font-size:11px;color:var(--mu);margin:4px 0">' + psSsLocSummaryHtml(p.sku, idx) + '</span>'
+            : '<span id="ps-ssloc-' + idx + '" style="display:block;font-size:11px;color:var(--mu);margin:4px 0">📍 Consultando ShipStation...</span>')
         // #21D: una sola autoridad de inventario — el mismo estado confirmado
         // por /sb/inventory que usa la tarjeta 🔒 YA LISTADO (nunca la
         // cantidad de /sb/search).
@@ -7676,53 +7688,109 @@ async function psCheckSellbrite(upc, brand){
   }
 }
 
+// #21F: estado de ubicación por SKU EXACTO. La respuesta solo se usa si
+// sigue siendo el escaneo vigente (_psSbSeq + UPC) y el índice todavía es
+// de ESE SKU — una respuesta tardía de otro producto no pinta ni cambia
+// currentLoc (ni la próxima "Añadir").
+function psSsLocFor(sku){ return (window._psSsLoc || {})[psSbInvKey(sku)] || null; }
+function psSsLocDraftSet(idx, value){
+  var p = (_psSellbriteProducts || {})[idx];
+  if (!p) return;
+  window._psSsLocDraft = window._psSsLocDraft || {};
+  window._psSsLocDraft[psSbInvKey(p.sku)] = String(value == null ? '' : value);
+}
+function psSsLocDraftGet(sku){ return ((window._psSsLocDraft || {})[psSbInvKey(sku)]) || ''; }
+function psSsLocDraftClear(sku){ if (window._psSsLocDraft) delete window._psSsLocDraft[psSbInvKey(sku)]; }
+
+function psSsLocChips(loc, idx, editable){
+  var parts = String(loc || '').split(',').map(function(s){ return s.trim(); }).filter(Boolean);
+  return parts.map(function(part, pi){
+    return '<span style="display:inline-flex;align-items:center;gap:5px;background:rgba(0,230,118,.12);border:1px solid rgba(0,230,118,.4);border-radius:14px;padding:3px ' + (editable ? '6px' : '10px') + ' 3px 10px;margin:2px 3px 2px 0">'
+      + '<strong style="color:#00e676;font-size:12px">' + esc(part) + '</strong>'
+      + (editable ? '<button onclick="psRemoveLocation(' + idx + ',' + pi + ')" style="width:18px;height:18px;background:rgba(255,82,82,.25);color:#ff8a80;border:none;border-radius:50%;font-size:11px;line-height:1;cursor:pointer;padding:0">✕</button>' : '')
+      + '</span>';
+  }).join('');
+}
+
+// El editor de siempre (fichitas con ✕, campo, 📷, Añadir / Reemplazar).
+function psSsLocEditorHtml(sku, idx){
+  var st = psSsLocFor(sku);
+  if (!st || st.state === 'loading') return '📍 Consultando ShipStation...';
+  if (st.state !== 'ok') return '📍 <span style="color:var(--mu)">No se pudo consultar ubicación</span>';
+  var loc = st.loc;
+  // Cada ubicación (separada por coma) se muestra como fichita con ✕ para borrarla individualmente
+  var statusLine;
+  if (loc) {
+    statusLine = '📍 Ubicaciones: <span style="display:inline">' + psSsLocChips(loc, idx, true) + '</span>';
+  } else {
+    statusLine = st.exists
+      ? '📍 <span style="color:#ffab00">En ShipStation, sin ubicación asignada</span>'
+      : '📍 <span style="color:#ff9800">No está en ShipStation todavía</span>';
+  }
+  var locInputId = 'ps-ssloc-input-' + idx;
+  // Botones según haya o no ubicación existente:
+  // - Sin ubicación: solo "📍 Guardar"
+  // - Con ubicación: "➕ Añadir" (agrega sin borrar) y "🔄 Reemplazar"
+  var buttonsHtml = loc
+    ? '<button id="ps-ssloc-btn-' + idx + '" onclick="psSaveShipStationLocation(' + idx + ',\'append\')" style="padding:8px 10px;background:linear-gradient(135deg,#00c853,#00963f);border:none;border-radius:8px;color:#fff;font-size:12px;font-weight:700;cursor:pointer;white-space:nowrap">➕ Añadir</button>'
+      + '<button id="ps-ssloc-btn-rep-' + idx + '" onclick="psSaveShipStationLocation(' + idx + ',\'replace\')" style="padding:8px 10px;background:var(--sf2);border:1px solid var(--bd);border-radius:8px;color:var(--tx);font-size:12px;font-weight:700;cursor:pointer;white-space:nowrap">🔄 Reemplazar</button>'
+    : '<button id="ps-ssloc-btn-' + idx + '" onclick="psSaveShipStationLocation(' + idx + ',\'replace\')" style="padding:8px 12px;background:var(--sf2);border:1px solid var(--bd);border-radius:8px;color:var(--tx);font-size:12px;font-weight:700;cursor:pointer;white-space:nowrap">📍 Guardar</button>';
+  var draft = psSsLocDraftGet(sku);
+  return '<span id="ps-ssloc-line-' + idx + '">' + statusLine + '</span>'
+    + '<div style="display:flex;gap:6px;margin-top:6px">'
+    + '<input id="' + locInputId + '" type="text" value="' + esc(draft) + '" oninput="psSsLocDraftSet(' + idx + ',this.value)" placeholder="' + (loc ? 'Nueva ubicación adicional...' : 'Ej: A-12') + '" autocapitalize="characters" style="flex:1;min-width:0;background:var(--sf2);border:1px solid var(--bd);border-radius:8px;padding:8px;color:var(--tx);font-size:13px">'
+    + '<button onclick="psScanLocation(' + idx + ')" style="padding:8px 10px;background:var(--sf2);border:1px solid var(--bd);border-radius:8px;color:var(--tx);font-size:16px;cursor:pointer">📷</button>'
+    + buttonsHtml
+    + '</div>'
+    + '<div id="ps-ssloc-confirm-' + idx + '" style="margin-top:6px;font-size:12px;text-align:center"></div>';
+}
+
+// Resumen de solo lectura para la tarjeta de producto de arriba cuando el SKU
+// tiene tarjeta 🔒 (un solo editor por SKU).
+function psSsLocSummaryHtml(sku, idx){
+  var st = psSsLocFor(sku);
+  if (!st || st.state === 'loading') return '📍 Consultando ShipStation...';
+  if (st.state !== 'ok') return '📍 <span style="color:var(--mu)">No se pudo consultar ubicación</span>';
+  var h = st.loc ? '📍 Ubicaciones: <span style="display:inline">' + psSsLocChips(st.loc, idx, false) + '</span>'
+    : (st.exists ? '📍 <span style="color:#ffab00">En ShipStation, sin ubicación asignada</span>'
+                 : '📍 <span style="color:#ff9800">No está en ShipStation todavía</span>');
+  return h + '<div style="font-size:11px;color:var(--mu);margin-top:2px">Para cambiar ubicaciones usa la tarjeta 🔒 YA LISTADO del Bulk Split.</div>';
+}
+
+function psRenderSsLoc(sku, idx){
+  var ed = $('ps-ssloc-' + idx);
+  if (ed) ed.innerHTML = psSsLocEditorHtml(sku, idx);
+  var ro = $('ps-ssloc-ro-' + idx);
+  if (ro) ro.innerHTML = psSsLocSummaryHtml(sku, idx);
+}
+
 async function psCheckShipStationLocation(sku, idx){
-  const el = $('ps-ssloc-' + idx);
-  if(!el) return;
-  // RAILWAY_SB URLs now use SAVVY_API for staging
+  var key = psSbInvKey(sku);
+  var seq = _psSbSeq, upc = (window._psSbState || {}).upc;
+  window._psSsLoc = window._psSsLoc || {};
+  if (!window._psSsLoc[key]) { window._psSsLoc[key] = { state: 'loading', sku: sku, seq: seq, upc: upc }; psRenderSsLoc(sku, idx); }
+  var data = null, failed = false;
   try{
     const res = await psAuthFetch('/ss/location' + '?sku=' + encodeURIComponent(sku));
-    const data = await res.json();
-    const loc = data.exists ? (data.warehouse_location || '') : '';
-    if(_psSellbriteProducts[idx]) _psSellbriteProducts[idx].currentLoc = loc; // para modo "añadir"/borrar
-
-    // Cada ubicación (separada por coma) se muestra como fichita con ✕ para borrarla individualmente
-    let statusLine;
-    if (loc) {
-      const parts = loc.split(',').map(function(s){ return s.trim(); }).filter(Boolean);
-      let chips = parts.map(function(part, pi){
-        return '<span style="display:inline-flex;align-items:center;gap:5px;background:rgba(0,230,118,.12);border:1px solid rgba(0,230,118,.4);border-radius:14px;padding:3px 6px 3px 10px;margin:2px 3px 2px 0">'
-          + '<strong style="color:#00e676;font-size:12px">' + esc(part) + '</strong>'
-          + '<button onclick="psRemoveLocation(' + idx + ',' + pi + ')" style="width:18px;height:18px;background:rgba(255,82,82,.25);color:#ff8a80;border:none;border-radius:50%;font-size:11px;line-height:1;cursor:pointer;padding:0">✕</button>'
-          + '</span>';
-      }).join('');
-      statusLine = '📍 Ubicaciones: <span style="display:inline">' + chips + '</span>';
-    } else {
-      statusLine = data.exists
-        ? '📍 <span style="color:#ffab00">En ShipStation, sin ubicación asignada</span>'
-        : '📍 <span style="color:#ff9800">No está en ShipStation todavía</span>';
-    }
-
-    const locInputId = 'ps-ssloc-input-' + idx;
-    // Botones según haya o no ubicación existente:
-    // - Sin ubicación: solo "📍 Guardar"
-    // - Con ubicación: "➕ Añadir" (agrega sin borrar) y "🔄 Reemplazar"
-    const buttonsHtml = loc
-      ? '<button id="ps-ssloc-btn-' + idx + '" onclick="psSaveShipStationLocation(' + idx + ',\'append\')" style="padding:8px 10px;background:linear-gradient(135deg,#00c853,#00963f);border:none;border-radius:8px;color:#fff;font-size:12px;font-weight:700;cursor:pointer;white-space:nowrap">➕ Añadir</button>'
-        + '<button id="ps-ssloc-btn-rep-' + idx + '" onclick="psSaveShipStationLocation(' + idx + ',\'replace\')" style="padding:8px 10px;background:var(--sf2);border:1px solid var(--bd);border-radius:8px;color:var(--tx);font-size:12px;font-weight:700;cursor:pointer;white-space:nowrap">🔄 Reemplazar</button>'
-      : '<button id="ps-ssloc-btn-' + idx + '" onclick="psSaveShipStationLocation(' + idx + ',\'replace\')" style="padding:8px 12px;background:var(--sf2);border:1px solid var(--bd);border-radius:8px;color:var(--tx);font-size:12px;font-weight:700;cursor:pointer;white-space:nowrap">📍 Guardar</button>';
-
-    el.innerHTML = '<span id="ps-ssloc-line-' + idx + '">' + statusLine + '</span>'
-      + '<div style="display:flex;gap:6px;margin-top:6px">'
-      + '<input id="' + locInputId + '" type="text" placeholder="' + (loc ? 'Nueva ubicación adicional...' : 'Ej: A-12') + '" autocapitalize="characters" style="flex:1;min-width:0;background:var(--sf2);border:1px solid var(--bd);border-radius:8px;padding:8px;color:var(--tx);font-size:13px">'
-      + '<button onclick="psScanLocation(' + idx + ')" style="padding:8px 10px;background:var(--sf2);border:1px solid var(--bd);border-radius:8px;color:var(--tx);font-size:16px;cursor:pointer">📷</button>'
-      + buttonsHtml
-      + '</div>'
-      + '<div id="ps-ssloc-confirm-' + idx + '" style="margin-top:6px;font-size:12px;text-align:center"></div>';
+    data = await res.json();
+    if (!res.ok) failed = true;
   }catch(err){
     console.error('psCheckShipStationLocation error:', err);
-    el.innerHTML = '📍 <span style="color:var(--mu)">No se pudo consultar ubicación</span>';
+    failed = true;
   }
+  // Respuesta vieja (otro escaneo) o el índice ya es de otro SKU: se ignora.
+  if (!psSbInvFresh(upc, seq)) return;
+  var p = (_psSellbriteProducts || {})[idx];
+  if (!p || psSbInvKey(p.sku) !== key) return;
+  if (failed || !data) {
+    window._psSsLoc[key] = { state: 'error', sku: sku, seq: seq, upc: upc };
+    psRenderSsLoc(sku, idx);
+    return;
+  }
+  var loc = data.exists ? (data.warehouse_location || '') : '';
+  p.currentLoc = loc; // para modo "añadir"/borrar
+  window._psSsLoc[key] = { state: 'ok', exists: !!data.exists, loc: loc, sku: sku, seq: seq, upc: upc };
+  psRenderSsLoc(sku, idx);
 }
 
 // ── Escanear la ubicación con la cámara (código de barras del anaquel/caja) ──
@@ -7745,6 +7813,7 @@ function psScanLocation(idx){
       var input = document.getElementById('ps-ssloc-input-' + idx);
       var value = String(txt||'').trim();
       if(input) input.value = value;
+      psSsLocDraftSet(idx, value);
       toast('📷 Ubicación escaneada: ' + value);
     });
   }, 100);
@@ -7760,6 +7829,11 @@ async function psSaveShipStationLocation(idx, mode){
   const input = $('ps-ssloc-input-' + idx);
   const newLoc = (input && input.value || '').trim();
   if(!newLoc){ toast('⚠️ Escribe o escanea una ubicación primero'); return; }
+  // #21F: sin la lectura confirmada de ESTE SKU no se sabe qué hay hoy;
+  // "Añadir" borraría lo que no se leyó.
+  const _ls = psSsLocFor(p.sku);
+  if(!_ls || _ls.state !== 'ok'){ toast('⚠️ No se pudo leer la ubicación actual — reintenta antes de guardar'); return; }
+  p.currentLoc = _ls.loc;
 
   // ── Modo AÑADIR: combinar con la ubicación existente sin borrarla ──
   let location = newLoc;
@@ -7783,7 +7857,9 @@ async function psSaveShipStationLocation(idx, mode){
 // ── Borrar UNA ubicación individual (la ✕ de cada fichita) ──
 async function psRemoveLocation(idx, partIndex){
   const p = (_psSellbriteProducts || {})[idx];
-  if(!p || !p.currentLoc){ toast('⚠️ No hay ubicaciones cargadas'); return; }
+  const _ls = p ? psSsLocFor(p.sku) : null;
+  if(!p || !_ls || _ls.state !== 'ok' || !_ls.loc){ toast('⚠️ No hay ubicaciones cargadas'); return; }
+  p.currentLoc = _ls.loc;
   const parts = p.currentLoc.split(',').map(function(s){ return s.trim(); }).filter(Boolean);
   if(partIndex < 0 || partIndex >= parts.length) return;
   const removed = parts.splice(partIndex, 1)[0];
@@ -7803,6 +7879,16 @@ async function psPersistLocation(idx, location){
   // RAILWAY_SB URLs now use SAVVY_API for staging
 
   const btnRep = $('ps-ssloc-btn-rep-' + idx);
+  // #21F: bin_location se escribe con /sb/update-inventory en el MISMO
+  // almacén confirmado por /sb/inventory (#21C). Sin inventario confirmado
+  // no se escribe nada (Sellbrite ni ShipStation), para no desalinearlos.
+  const _inv = psSbInvFor(p.sku);
+  if(!(_inv && _inv.state === 'ok')){
+    if(confirmEl) confirmEl.innerHTML = '<span style="color:#ffb300;font-weight:700">⚠️ Inventario no confirmado — no se guardó la ubicación.</span>';
+    toast('⚠️ Inventario no confirmado — no se guardó la ubicación');
+    return;
+  }
+  const _seq = _psSbSeq;
   if(btnEl){ btnEl.disabled = true; btnEl.textContent = '⏳...'; }
   if(btnRep){ btnRep.disabled = true; }
 
@@ -7819,7 +7905,7 @@ async function psPersistLocation(idx, location){
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({
         sku: p.sku,
-        warehouse_uuid: p.warehouse_uuid || '',
+        warehouse_uuid: _inv.warehouse_uuid,
         bin_location: location
       })
     });
@@ -7849,6 +7935,13 @@ async function psPersistLocation(idx, location){
 
   // ── Resultado combinado, claro y permanente ──
   const isClear = !location;
+  // #21F: si mientras tanto se escaneó otro producto, este índice ya es de
+  // otro SKU — solo se avisa; no se pinta ni se relee aquí.
+  if(_seq !== _psSbSeq){
+    toast(sbOk && ssOk ? ('✅ Ubicación de ' + p.sku + ' guardada') : ('⚠️ Ubicación de ' + p.sku + ': revisa el resultado'), 3500);
+    return;
+  }
+  if(sbOk && ssOk || !sbOk && ssOk) psSsLocDraftClear(p.sku);
   if(sbOk && ssOk){
     toast(isClear ? '🗑️ Ubicación borrada' : '✅ Ubicación guardada en Sellbrite y ShipStation', 3000);
     await psCheckShipStationLocation(p.sku, idx); // refresca — las fichitas verdes son la confirmación
