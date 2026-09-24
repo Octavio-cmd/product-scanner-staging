@@ -84,6 +84,45 @@ const storage = {
 // the backend returns them ({ sku, name, inventory }). sbCalls counts hits.
 let sbConfig = { products: [] };
 let sbCalls = 0;
+// #21D: GET /sb/inventory?sku= answers from the same fixture products (one
+// warehouse). A numeric total -> confirmed; the backend "sin_inventario" shape
+// with a 0 row -> confirmed 0; no inventory at all -> found:false (unknown).
+function invFromFixture(products, sku) {
+  const p = (products || []).find(x => x.sku === sku);
+  const inv = (p && p.inventory) || {};
+  let q;
+  if (typeof inv.total_quantity === 'number') q = inv.total_quantity;
+  else if (inv.source === 'sin_inventario' && (inv.channels || []).length) q = Number(inv.channels[0].available) || 0;
+  if (q === undefined) return { status: 'success', sku, inventory: { total_quantity: 0, total_on_hand: 0, channels: [], warehouses: [], found: false } };
+  const ch = [{ warehouse_uuid: 'wh-1', warehouse_name: 'Main', available: q, on_hand: q, bin_location: '' }];
+  return { status: 'success', sku, inventory: { total_quantity: q, total_on_hand: q, channels: ch, warehouses: ch, found: true, available_confirmed: true } };
+}
+// #21D: in the browser the warning slot lives INSIDE #ps-sellbrite-status, so
+// reading the status element shows the slot's current content. The stub keeps
+// them as separate objects; this getter restores that DOM relationship.
+function linkStatusSlot(getEl, sandbox) {
+  const st = getEl('ps-sellbrite-status');
+  const PRE = '<div id="ps-existing-product-slot">';
+  let raw = '', tail = null;
+  Object.defineProperty(st, 'innerHTML', {
+    configurable: true,
+    get() {
+      if (tail === null) return raw;
+      return PRE + getEl('ps-existing-product-slot').innerHTML + '</div>' + tail;
+    },
+    set(v) {
+      raw = String(v); tail = null;
+      if (raw.startsWith(PRE)) {
+        let w = '';
+        try { w = sandbox.psCombinedExistingWarningHtml(); } catch (e) { w = null; }
+        if (w !== null && raw.startsWith(PRE + w + '</div>')) {
+          tail = raw.slice((PRE + w + '</div>').length);
+          getEl('ps-existing-product-slot').innerHTML = w;
+        }
+      }
+    }
+  });
+}
 const sandbox = {
   console: { log() {}, error() {}, warn() {}, info() {}, debug() {} },
   document: documentStub, localStorage: storage, sessionStorage: storage,
@@ -96,6 +135,10 @@ const sandbox = {
       if (!sbConfig.products.length) return { ok: false, status: 404, json: async () => ({ status: 'not_found', products: [] }) };
       const products = JSON.parse(JSON.stringify(sbConfig.products));
       return { ok: true, status: 200, json: async () => ({ status: 'success', products: products }) };
+    }
+    if (u.indexOf('/sb/inventory') >= 0) {
+      const body = invFromFixture(sbConfig.products, decodeURIComponent((u.match(/sku=([^&]+)/) || [])[1] || ''));
+      return { ok: true, status: 200, json: async () => body };
     }
     if (u.indexOf('/ss/location') >= 0) {
       return { ok: true, status: 200, json: async () => ({ exists: false }) };
@@ -136,6 +179,7 @@ try { vm.runInContext(appSrc, sandbox, { filename: 'app.js' }); } catch (e) { lo
 section('LOAD — real multipack-fixes.js + real app.js into sandbox');
 if (loadError) console.log('  note: ' + loadError);
 (docListeners.DOMContentLoaded || []).forEach(fn => { try { fn(); } catch (e) {} });
+linkStatusSlot(getEl, sandbox);
 vm.runInContext(`savvyToken = function(){ return 'fake-token'; };`, sandbox);
 
 function setBulk(arr) { sandbox.__b = arr; vm.runInContext('bulk = __b;', sandbox); }
