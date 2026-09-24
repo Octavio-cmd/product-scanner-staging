@@ -115,6 +115,16 @@ const sandbox = {
       const avail = body.mode === 'add' ? prev + body.quantity : body.quantity;
       return jsonRes(200, { status: 'success', sku: body.sku, available: avail, previous_available: prev, mode: body.mode });
     }
+    // #21C: /sb/inventory?sku= (read-only) answers from the same fixture
+    // products — one warehouse, available = the fixture quantity.
+    if (u.indexOf('/sb/inventory') >= 0) {
+      const sku = decodeURIComponent((u.match(/sku=([^&]+)/) || [])[1] || '');
+      const p = sbConfig.products.find(x => x.sku === sku);
+      if (!p) return jsonRes(200, { status: 'success', sku, inventory: { total_quantity: 0, total_on_hand: 0, channels: [], warehouses: [], found: false } });
+      const q = p.inventory.total_quantity;
+      const ch = [{ warehouse_uuid: 'wh-1', warehouse_name: 'Main', available: q, on_hand: q, bin_location: '' }];
+      return jsonRes(200, { status: 'success', sku, inventory: { total_quantity: q, total_on_hand: q, channels: ch, warehouses: ch, found: true } });
+    }
     otherCalls.push({ u, method });
     if (u.indexOf('/ss/location') >= 0) {
       return { ok: true, status: 200, json: async () => ({ exists: false }) };
@@ -211,6 +221,17 @@ async function scan(upc, brand, sbProducts, eb, opts) {
   if (typeof eb === 'string') ebConfig.mode = eb; else ebConfig.listings = eb || [];
   if (opts.sbFail) sbConfig.defer = async () => jsonRes(500, { error: 'boom' }); else sbConfig.defer = null;
   await Promise.all([sandbox.psCheckSellbrite(upc, brand), sandbox.psCheckEbaySellerListings(upc, brand, '')]);
+  await settleInventory();
+}
+// #21C: the per-SKU /sb/inventory reads run after /sb/search; wait for them
+// and re-render the split so results() reflects the confirmed quantities.
+async function settleInventory() {
+  for (let n = 0; n < 50; n++) {
+    const inv = vm.runInContext('window._psSbInv || {}', sandbox);
+    if (!Object.values(inv).some(a => a && a.state === 'loading')) break;
+    await new Promise(r => setImmediate(r));
+  }
+  try { sandbox.updateSplitCalc(); } catch (e) {}
 }
 async function captureExport() {
   const toasts = [], alerts = [];

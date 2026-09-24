@@ -7175,6 +7175,134 @@ function psRefreshPackLocks(upcClean){
   try { updateSplitCalc(); } catch(e) {}
 }
 
+// ━━ INVENTARIO CONFIRMADO POR SKU EXACTO (Implementación #21C) ━━━━━━━━━━
+// /sb/search sirve para saber QUÉ SKUs existen (y bloquear el pack), pero su
+// cantidad puede venir de un respaldo (source "sin_inventario" o
+// "product.quantity") cuando la lectura de inventario falla dentro de esa
+// ruta. Para los controles de inventario manda /sb/inventory?sku=<SKU>:
+//   ok      -> un solo registro de almacén con available numérico: se muestra
+//              y se habilitan SUMAR/REEMPLAZAR sobre ESE almacén
+//   loading -> "Consultando inventario…", botones deshabilitados
+//   error   -> "Inventario no confirmado", botones deshabilitados (nunca 0)
+//   multi   -> varios almacenes: no se suma ni se elige uno; deshabilitado
+// El pack sigue bloqueado en todos los casos: existencia e inventario son
+// cosas distintas.
+function psSbInvKey(sku){ return String(sku || '').trim().toUpperCase(); }
+function psSbInvFor(sku){ return (window._psSbInv || {})[psSbInvKey(sku)] || null; }
+
+function psParseSbInventory(sku, status, body){
+  if (status !== 200 || !body || typeof body !== 'object') return { state: 'error', reason: 'HTTP ' + status };
+  if (body.status !== 'success' || psSbInvKey(body.sku) !== psSbInvKey(sku)) return { state: 'error', reason: 'respuesta inesperada' };
+  var inv = body.inventory;
+  if (!inv || typeof inv !== 'object' || inv.found !== true) return { state: 'error', reason: 'sin registro de inventario' };
+  var rows = (Array.isArray(inv.channels) ? inv.channels : []).filter(function(r){ return r && typeof r === 'object'; });
+  if (!rows.length) return { state: 'error', reason: 'sin almacén' };
+  if (rows.length > 1) return { state: 'multi', count: rows.length };
+  var r = rows[0];
+  var num = function(v){ return typeof v === 'number' && isFinite(v); };
+  if (!r.warehouse_uuid || !num(r.available)) return { state: 'error', reason: 'cantidad no numérica' };
+  return { state: 'ok', available: r.available, on_hand: num(r.on_hand) ? r.on_hand : null,
+           warehouse_uuid: String(r.warehouse_uuid), warehouse_name: r.warehouse_name || '' };
+}
+
+async function psReadSbInventory(sku){
+  try {
+    const res = await psAuthFetch('/sb/inventory?sku=' + encodeURIComponent(sku));
+    var body = null;
+    try { body = await res.json(); } catch(e) { body = null; }
+    return psParseSbInventory(sku, res.status, body);
+  } catch(e) {
+    return { state: 'error', reason: (e && e.message) || String(e) };
+  }
+}
+
+// Una respuesta vale solo si sigue siendo el escaneo vigente (mismo
+// _psSbSeq de psCheckSellbrite y mismo UPC): nada de un UPC anterior ni de
+// una consulta vieja del mismo UPC.
+function psSbInvFresh(upcClean, sbSeq){
+  return sbSeq === _psSbSeq && (window._psSbState || {}).upc === upcClean;
+}
+
+function psApplySbInventory(upcClean, sku, sbSeq, result){
+  if (!psSbInvFresh(upcClean, sbSeq)) return;
+  result.sku = sku; result.upc = upcClean; result.seq = sbSeq;
+  window._psSbInv = window._psSbInv || {};
+  window._psSbInv[psSbInvKey(sku)] = result;
+  psRenderSbRecord(sku);
+}
+
+async function psLoadSbInventory(upcClean, skus, sbSeq){
+  window._psSbInv = window._psSbInv || {};
+  var list = [], seen = {};
+  (skus || []).forEach(function(sku){
+    var k = psSbInvKey(sku);
+    if (!k || seen[k]) return;
+    seen[k] = true;
+    window._psSbInv[k] = { state: 'loading', sku: sku, upc: upcClean, seq: sbSeq };
+    list.push(sku);
+  });
+  // Uno por uno: /sb/search acaba de hacer ~24 consultas a Sellbrite.
+  for (var n = 0; n < list.length; n++) {
+    if (!psSbInvFresh(upcClean, sbSeq)) return;
+    var result = await psReadSbInventory(list[n]);
+    psApplySbInventory(upcClean, list[n], sbSeq, result);
+  }
+}
+
+// Vuelve a leer el inventario de un SKU (después de SUMAR/REEMPLAZAR).
+async function psReconcileSbInventory(sku){
+  var a = psSbInvFor(sku);
+  if (!a) return;
+  var result = await psReadSbInventory(sku);
+  psApplySbInventory(a.upc, sku, a.seq, result);
+}
+
+// Repinta SOLO el registro de ese SKU (no todo el Bulk Split: no se toca la
+// cantidad que el empleado esté escribiendo en otro registro, ni el estado
+// del reparto / Regresar y corregir). Conserva el mensaje de confirmación.
+function psRenderSbRecord(sku){
+  var i = psSbProductIdxForSku(sku);
+  if (i == null) return;
+  var el = $('ps-pack-sbrec-' + i);
+  if (!el) return;
+  var prev = $('ps-pack-sbconfirm-' + i);
+  var keep = prev ? prev.innerHTML : '';
+  el.innerHTML = psSbRecordInnerHtml(sku, i);
+  var now = $('ps-pack-sbconfirm-' + i);
+  if (now && keep) now.innerHTML = keep;
+}
+
+function psSbRecordInnerHtml(sku, i){
+  var a = psSbInvFor(sku) || { state: 'loading' };
+  var vacio = typeof _psSbInvVacio !== 'undefined' && _psSbInvVacio && _psSbInvVacio[i];
+  var ok = a.state === 'ok' && !vacio;
+  var h = '<div style="font-size:12px">Sellbrite: <span style="font-family:monospace">' + esc(sku) + '</span> · ';
+  if (a.state === 'ok') {
+    h += 'Qty actual: <strong id="ps-pack-sbavail-' + i + '">' + a.available + '</strong>';
+  } else if (a.state === 'loading') {
+    h += '<span id="ps-pack-sbavail-' + i + '" style="color:var(--mu)">⏳ Consultando inventario…</span>';
+  } else {
+    h += '<strong id="ps-pack-sbavail-' + i + '" style="color:#ffb300">⚠️ Inventario no confirmado</strong>';
+  }
+  h += '</div>';
+  if (a.state === 'error') {
+    h += '<div style="font-size:11px;color:#ffb300;margin-top:4px">El producto existe en Sellbrite, pero no se pudo confirmar la cantidad actual. No se modificó inventario.</div>';
+  } else if (a.state === 'multi') {
+    h += '<div style="font-size:11px;color:#ffb300;margin-top:4px">Este SKU tiene ' + a.count + ' almacenes en Sellbrite. Actualiza el inventario directo en Sellbrite eligiendo el almacén; aquí no se modifica.</div>';
+  }
+  var dis = ok ? '' : ' disabled';
+  var dim = ok ? '' : ';opacity:.45';
+  h += '<div style="display:flex;align-items:center;gap:6px;margin-top:6px"><span style="font-size:11px;color:var(--mu)">Cantidad recibida</span>'
+    + '<button' + dis + ' onclick="psAdjustSbQty(\'ps-pack-sbqty-' + i + '\',-1)" style="width:30px;height:30px;background:var(--sf2);border:1px solid var(--bd);border-radius:8px;color:var(--tx)' + dim + '">−</button>'
+    + '<input' + dis + ' id="ps-pack-sbqty-' + i + '" type="number" inputmode="numeric" value="0" style="width:60px;background:var(--sf2);border:1px solid var(--bd);border-radius:8px;padding:6px;color:var(--tx);text-align:center' + dim + '">'
+    + '<button' + dis + ' onclick="psAdjustSbQty(\'ps-pack-sbqty-' + i + '\',1)" style="width:30px;height:30px;background:var(--sf2);border:1px solid var(--bd);border-radius:8px;color:var(--tx)' + dim + '">+</button></div>'
+    + '<div style="display:flex;gap:6px;margin-top:6px">'
+    + '<button' + dis + ' id="ps-pack-sbadd-' + i + '" onclick="psUpdateSellbriteInventory(' + i + ',\'add\',\'pack\')" style="flex:1;padding:8px;background:linear-gradient(135deg,#00c853,#00963f);border:none;border-radius:8px;color:#fff;font-weight:800' + dim + '">➕ SUMAR</button>'
+    + '<button' + dis + ' id="ps-pack-sbset-' + i + '" onclick="psUpdateSellbriteInventory(' + i + ',\'set\',\'pack\')" style="flex:1;padding:8px;background:var(--sf2);border:1px solid var(--bd);border-radius:8px;color:var(--tx);font-weight:800' + dim + '">🔄 REEMPLAZAR</button></div>'
+    + '<div id="ps-pack-sbconfirm-' + i + '" style="margin-top:4px;font-size:11px;text-align:center"></div>';
+  return h;
+}
+
 // Tarjeta de un pack bloqueado dentro del Bulk Split.
 function psLockedPackCardHtml(st){
   var p = st.pack;
@@ -7187,22 +7315,14 @@ function psLockedPackCardHtml(st){
     if (st.sellbrite.length > 1) body += '<div style="font-size:11px;color:#ffb300;font-weight:700">' + st.sellbrite.length + ' registros en Sellbrite — elige cuál actualizar</div>';
     st.sellbrite.forEach(function(r){
       var i = r.idx;
-      var ok = i != null && !(typeof _psSbInvVacio !== 'undefined' && _psSbInvVacio && _psSbInvVacio[i]);
-      body += '<div style="margin-top:6px;padding:6px;border:1px solid var(--bd);border-radius:8px">'
-        + '<div style="font-size:12px">Sellbrite: <span style="font-family:monospace">' + esc(r.sku) + '</span> · Qty actual: <strong id="ps-pack-sbavail-' + i + '">' + (r.qty != null ? r.qty : '¿?') + '</strong></div>';
-      if (ok) {
-        body += '<div style="display:flex;align-items:center;gap:6px;margin-top:6px"><span style="font-size:11px;color:var(--mu)">Cantidad recibida</span>'
-          + '<button onclick="psAdjustSbQty(\'ps-pack-sbqty-' + i + '\',-1)" style="width:30px;height:30px;background:var(--sf2);border:1px solid var(--bd);border-radius:8px;color:var(--tx)">−</button>'
-          + '<input id="ps-pack-sbqty-' + i + '" type="number" inputmode="numeric" value="0" style="width:60px;background:var(--sf2);border:1px solid var(--bd);border-radius:8px;padding:6px;color:var(--tx);text-align:center">'
-          + '<button onclick="psAdjustSbQty(\'ps-pack-sbqty-' + i + '\',1)" style="width:30px;height:30px;background:var(--sf2);border:1px solid var(--bd);border-radius:8px;color:var(--tx)">+</button></div>'
-          + '<div style="display:flex;gap:6px;margin-top:6px">'
-          + '<button id="ps-pack-sbadd-' + i + '" onclick="psUpdateSellbriteInventory(' + i + ',\'add\',\'pack\')" style="flex:1;padding:8px;background:linear-gradient(135deg,#00c853,#00963f);border:none;border-radius:8px;color:#fff;font-weight:800">➕ SUMAR</button>'
-          + '<button id="ps-pack-sbset-' + i + '" onclick="psUpdateSellbriteInventory(' + i + ',\'set\',\'pack\')" style="flex:1;padding:8px;background:var(--sf2);border:1px solid var(--bd);border-radius:8px;color:var(--tx);font-weight:800">🔄 REEMPLAZAR</button></div>'
-          + '<div id="ps-pack-sbconfirm-' + i + '" style="margin-top:4px;font-size:11px;text-align:center"></div>';
-      } else {
-        body += '<div style="font-size:11px;color:#ff5252">🛑 Sellbrite no devolvió el inventario de este SKU — actualízalo directo en Sellbrite.</div>';
+      if (i == null) {
+        body += '<div style="margin-top:6px;padding:6px;border:1px solid var(--bd);border-radius:8px">'
+          + '<div style="font-size:12px">Sellbrite: <span style="font-family:monospace">' + esc(r.sku) + '</span></div>'
+          + '<div style="font-size:11px;color:#ff5252">🛑 Sellbrite no devolvió el inventario de este SKU — actualízalo directo en Sellbrite.</div></div>';
+        return;
       }
-      body += '</div>';
+      body += '<div id="ps-pack-sbrec-' + i + '" style="margin-top:6px;padding:6px;border:1px solid var(--bd);border-radius:8px">'
+        + psSbRecordInnerHtml(r.sku, i) + '</div>';
     });
     body += ebLines;
   } else {
@@ -7236,6 +7356,7 @@ async function psCheckSellbrite(upc, brand){
   if(!statusEl) return;
   window._psSbExisting = {}; // limpiar estado del producto anterior
   window._psSbExistingListings = [];
+  window._psSbInv = {};       // #21C: inventario confirmado por SKU exacto
   // Implementación #20B: una respuesta tardía de un escaneo anterior no debe
   // pintar ni excluir nada en el producto actual.
   var sbSeq = ++_psSbSeq;
@@ -7428,6 +7549,9 @@ async function psCheckSellbrite(upc, brand){
     });
     statusEl.innerHTML = html;
     psRenderExistingProductWarning();
+    // #21C: /sb/search solo dice QUÉ SKUs existen; la cantidad de cada uno
+    // se confirma con /sb/inventory antes de habilitar SUMAR/REEMPLAZAR.
+    psLoadSbInventory(upcClean, sbListings.map(function(l){ return l.sku; }), sbSeq);
     psRefreshPackLocks(upcClean);
 
     // Consultar la ubicación en ShipStation para cada SKU encontrado (en paralelo)
@@ -7674,6 +7798,14 @@ async function psUpdateSellbriteInventory(idx, modo, where){
   if(!p){ console.error('❌ No hay producto guardado en _psSellbriteProducts[' + idx + ']'); toast('⚠️ No se cargó el producto'); return; }
   const input = $(inPack ? 'ps-pack-sbqty-' + idx : p.inputId);
   const newQty = parseInt((input && input.value) || '0', 10);
+  // #21C: en la tarjeta del pack solo se escribe sobre un inventario
+  // CONFIRMADO por /sb/inventory, y en el MISMO almacén que se mostró.
+  const packInv = inPack ? psSbInvFor(p.sku) : null;
+  if (inPack && !(packInv && packInv.state === 'ok')) {
+    if (confirmEl) confirmEl.innerHTML = '<span style="color:#ffb300;font-weight:700">⚠️ Inventario no confirmado — no se modificó inventario.</span>';
+    toast('⚠️ Inventario no confirmado — no se modificó inventario');
+    return;
+  }
   // RAILWAY_SB URLs now use SAVVY_API for staging
 
   // Último recurso antes de mandar: si este producto no traía uuid (típico
@@ -7715,7 +7847,7 @@ async function psUpdateSellbriteInventory(idx, modo, where){
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({
         sku: p.sku,
-        warehouse_uuid: p.warehouse_uuid || '',
+        warehouse_uuid: inPack ? packInv.warehouse_uuid : (p.warehouse_uuid || ''),
         quantity: newQty,
         mode: (modo === 'add' ? 'add' : 'set')
       })
@@ -7737,6 +7869,8 @@ async function psUpdateSellbriteInventory(idx, modo, where){
     if (result.available != null) {
       (window._psSbExistingListings || []).forEach(function(l){ if (l.sku === p.sku) l.qty = result.available; });
     }
+    // #21C: el valor que devolvió el backend queda como el confirmado.
+    if (inPack && typeof result.available === 'number' && packInv.state === 'ok') packInv.available = result.available;
     var packAvail = $('ps-pack-sbavail-' + idx);
     if (packAvail) packAvail.textContent = _final;
     var _op = (result.mode === 'add')
@@ -7750,6 +7884,8 @@ async function psUpdateSellbriteInventory(idx, modo, where){
     // Dejar la casilla en 0 para que nadie repita la suma sin querer.
     if(input) input.value = 0;
     toast('✅ ' + p.sku + ' → ' + _final + ' unidades', 3000);
+    // #21C: se vuelve a leer /sb/inventory para reconciliar lo que se muestra.
+    if (inPack) await psReconcileSbInventory(p.sku);
   }catch(err){
     console.error('❌ psUpdateSellbriteInventory error:', err.message, err);
     if(confirmEl) confirmEl.innerHTML = '<span style="color:#ff5252;font-weight:700">❌ No se pudo actualizar: ' + esc(err.message||String(err)) + '</span>';
