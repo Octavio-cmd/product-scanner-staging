@@ -468,7 +468,7 @@ section('26 — Phase-1 behavior unchanged when eBay was never queried');
   const sha = s => crypto.createHash('sha256').update(s).digest('hex').slice(0, 16);
   check('exportCSV fingerprint (#21 gate)', sha(fnSource(appSrc, 'exportCSV')), 'ac8f3636516d82b0');
   check('calcBundlePrice unchanged', sha(fnSource(appSrc, 'calcBundlePrice')), 'd56265fdf8c804e4');
-  check('addSplitPacksToCSV fingerprint (#21 gate)', sha(fnSource(appSrc, 'addSplitPacksToCSV')), '469a5d0802931a09');
+  check('addSplitPacksToCSV fingerprint (#21 gate + #21E result)', sha(fnSource(appSrc, 'addSplitPacksToCSV')), 'e51b83b36a2475f1');
   check('updateSplitCalc fingerprint (#21 cards)', sha(fnSource(appSrc, 'updateSplitCalc')), '153ed75fd91fa6a8');
   check('computeSplit unchanged', sha(fnSource(appSrc, 'computeSplit')), 'b729a2b0e1211f1a');
   check('makeSKU unchanged', sha(fnSource(appSrc, 'makeSKU')), 'a9b61f94bc5cbbeb');

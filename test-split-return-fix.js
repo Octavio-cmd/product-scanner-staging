@@ -208,7 +208,8 @@ checkTrue('1h context clears only when _targetReplacedThisRun is true',
   /if \(_targetReplacedThisRun\) \{\s*\n\s*_psReturnToFixUpc = null;\s*\n\s*_psReturnToFixSku = null;\s*\n\s*\}/.test(appSrc),
   'gated context-clear block not found');
 checkTrue('1i window._psLastAddResult set by addSplitPacksToCSV',
-  /window\._psLastAddResult = \{ added: added, replaced: replaced, skippedDup: skippedDup \};/.test(appSrc),
+  // #21E: same assignment, now also carrying mode/reason for the button.
+  /window\._psLastAddResult = \{ added: added, replaced: replaced, skippedDup: skippedDup, mode: 'split',/.test(appSrc),
   '_psLastAddResult assignment not found');
 checkTrue('1j addFn button handler treats replaced>0 as success',
   /var _replaced = \(_r && _r\.replaced\) \|\| 0;\s*\n\s*\n?\s*if \(added > 0 \|\| _replaced > 0\) \{/.test(appSrc),

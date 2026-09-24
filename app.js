@@ -5941,8 +5941,13 @@ async function _addBulkInternal() {
   var _splitTotal = _splitInp ? (parseInt(String(_splitInp.value).replace(/\D/g,''), 10) || 0) : 0;
   if (_splitTotal > 0) {
     try {
-      var _splitOk = await addSplitPacksToCSV();
-      if (_splitOk) return; // packs agregados — listo
+      // #21E: el empleado pidió el Bulk Split. Si falla, falla — NUNCA se cae
+      // al Add de un solo pack (antes, sin foto el flujo seguía al 1pk y el
+      // mensaje culpaba al pack bloqueado; con un pack no bloqueado podía
+      // agregar un listado que nadie pidió). La razón queda en
+      // window._psLastAddResult para el botón.
+      await addSplitPacksToCSV();
+      return;
     } catch(_se) {
       console.error('addSplitPacksToCSV error:', _se);
       if (window._psDebug) window._psDebug('\u274c Split error: ' + (_se.message || _se));
@@ -6507,8 +6512,25 @@ function toggleSplitPack(p){
 }
 
 // ── Agregar todos los packs seleccionados al CSV (uno por pack) ────────
+// #21E: resultado del Bulk Split con su razón (lo lee el botón ADD TO CSV).
+function psSplitResult(reason, extra){
+  var r = Object.assign({ added: 0, replaced: 0, skippedDup: 0, mode: 'split', reason: reason }, extra || {});
+  window._psLastAddResult = r;
+  return r;
+}
+var PS_SPLIT_MSG = {
+  missing_photo:     '⚠️ Falta fotografía para los packs nuevos',
+  zero_listings:     '⚠️ Un pack quedó con 0 listados',
+  already_in_csv:    'ℹ️ Esos packs ya están en el CSV',
+  all_locked:        '🔒 Los packs elegidos ya existen',
+  invalid_split:     '⚠️ Reparto inválido',
+  no_packs_selected: '⚠️ No hay packs seleccionados',
+  no_product:        '⚠️ No hay producto activo',
+  nothing_added:     '⚠️ No se agregó ningún pack'
+};
+
 async function addSplitPacksToCSV(){
-  if (!cur) { toast('⚠️ No product loaded'); return false; }
+  if (!cur) { toast('⚠️ No product loaded'); psSplitResult('no_product'); return false; }
 
   // ── Misma protección que ADD TO CSV: esperar descripción rica ──
   if (cur && !cur._description) {
@@ -6535,9 +6557,9 @@ async function addSplitPacksToCSV(){
 
   var inp = $('split-total-input');
   var card = $('split-calc-card');
-  if (!inp || !card) return false;
+  if (!inp || !card) { psSplitResult('invalid_split'); return false; }
   var total = parseInt(String(inp.value).replace(/\D/g,''), 10) || 0;
-  if (total <= 0) { return false; }
+  if (total <= 0) { toast('⚠️ Reparto inválido — escribe el total de unidades'); psSplitResult('invalid_split'); return false; }
 
   var tierKey = card.dataset.tier || card.dataset.autoTier || 'media';
   var active = window._splitActive || {1:true,2:false,3:true,4:false,5:false,6:true,7:false,8:false,9:false,10:false,11:false,12:true};
@@ -6585,7 +6607,12 @@ async function addSplitPacksToCSV(){
   });
   if (_lockedSkipped.length) {
     toast('🔒 Ya existen, no se agregan: ' + _lockedSkipped.join(', '));
-    if (!packsToAdd.length) return true;   // nada que agregar — no caer al Add de un solo pack
+    if (!packsToAdd.length) { psSplitResult('all_locked', { locked: _lockedSkipped.slice() }); return true; }   // nada que agregar
+  }
+  if (!packsToAdd.length) {
+    toast('⚠️ No hay packs seleccionados en el reparto');
+    psSplitResult('no_packs_selected');
+    return false;
   }
 
   // ── ZERO QUANTITY VALIDATION: Block CSV export if any selected pack has Quantity <= 0
@@ -6605,6 +6632,7 @@ async function addSplitPacksToCSV(){
     toast(msg);
     console.log('[QTY-TRACE][VALIDATION-BLOCKED] ' + msg);
     console.log('[QTY-TRACE][BLOCKED-PACKS] ' + zeroQtyPacks.join(','));
+    psSplitResult('zero_listings', { packs: zeroQtyPacks.map(function(p){ return p + 'pk'; }), locked: _lockedSkipped.slice() });
     return false;
   }
 
@@ -6623,7 +6651,8 @@ async function addSplitPacksToCSV(){
     toast('⚠️ Sin imágenes de pack para ' + missingImgs.join(', ') + ' — usando foto genérica');
     // Si NO hay ni siquiera la foto genérica, no hay nada que agregar → cancelar
     if (!cur._bundleImg && !cur._imgUrl && !cur._frontImg) {
-      toast('❌ Sin fotos disponibles — toca 🎁 Generar Imágenes de Pack');
+      toast('⚠️ Falta fotografía para los packs nuevos — agrega una foto antes de añadir ' + missingImgs.join(', ') + ' al CSV.');
+      psSplitResult('missing_photo', { packs: missingImgs.slice(), locked: _lockedSkipped.slice() });
       return false;
     }
   }
@@ -6798,7 +6827,9 @@ async function addSplitPacksToCSV(){
     _psReturnToFixUpc = null;
     _psReturnToFixSku = null;
   }
-  window._psLastAddResult = { added: added, replaced: replaced, skippedDup: skippedDup };
+  window._psLastAddResult = { added: added, replaced: replaced, skippedDup: skippedDup, mode: 'split',
+    reason: (added > 0 || replaced > 0) ? 'success' : (skippedDup > 0 ? 'already_in_csv' : 'nothing_added'),
+    locked: _lockedSkipped.slice() };
   if (added > 0 || replaced > 0) {
     var _parts = [];
     if (added > 0) _parts.push(added + ' agregado(s)');
@@ -9827,8 +9858,10 @@ function renderResult(r){
             addB.style.pointerEvents = '';
           }, 2500);
         } else {
-          // NO se agregó nada — feedback amarillo
-          addB.textContent = '⚠️ Ya estaba o requisitos faltan';
+          // NO se agregó nada — feedback amarillo. #21E: si fue un Bulk Split,
+          // se dice la razón real (foto, 0 listados, ya en CSV, bloqueados…).
+          var _why = (_r && _r.mode === 'split' && _r.reason && typeof PS_SPLIT_MSG !== 'undefined') ? PS_SPLIT_MSG[_r.reason] : null;
+          addB.textContent = _why || '⚠️ Ya estaba o requisitos faltan';
           addB.style.background = '#ff9800';
           addB.style.opacity = '1';
           setTimeout(function(){

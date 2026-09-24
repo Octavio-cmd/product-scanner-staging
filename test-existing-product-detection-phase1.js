@@ -442,7 +442,7 @@ checkTrue('old PK-only regex removed from psCheckSellbrite',
 section('18 — PRICING UNCHANGED');
 check('calcBundlePrice() byte-identical to base 53b5994', sha(fnSource(appSrc, 'calcBundlePrice')), 'd56265fdf8c804e4');
 check('computeSplit() byte-identical to base', sha(fnSource(appSrc, 'computeSplit')), 'b729a2b0e1211f1a');
-check('addSplitPacksToCSV() fingerprint (#21 lock gate added; pricing checked below)', sha(fnSource(appSrc, 'addSplitPacksToCSV')), '469a5d0802931a09');
+check('addSplitPacksToCSV() fingerprint (#21 lock gate + #21E result; pricing checked below)', sha(fnSource(appSrc, 'addSplitPacksToCSV')), 'e51b83b36a2475f1');
 check('updateSplitCalc() fingerprint (#21 locked pack cards)', sha(fnSource(appSrc, 'updateSplitCalc')), '153ed75fd91fa6a8');
 {
   const row = getBulk().find(b => b.sku === 'IRW-710363598525-1pk');
