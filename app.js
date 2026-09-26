@@ -7090,7 +7090,7 @@ async function psCheckEbaySellerListings(upc, brand, title){
   window._psEbExisting = ebExisting;
   window._psEbSeller = { upc: upcClean, state: 'ok', listings: listings, error: '' };
   // #22B (solo pantalla): SKUs exactos de listados propios que Sellbrite no tenga.
-  psRequestSavvySales(upcClean, listings.map(function(l){ return l.sku; }));
+  psSalesAfterInventory(upcClean, listings.map(function(l){ return l.sku; }));
   psAutoExcludeConfirmedPacks(ebExisting, upcClean, 'eBay');
   psRenderExistingProductWarning();
   psRefreshPackLocks(upcClean);
@@ -7511,6 +7511,26 @@ function psRequestSavvySales(upcClean, skus){
   if (added) psRenderSavvySales();
 }
 
+// ━━ #22C-0A: INVENTARIO PRIMERO, VENTAS DESPUÉS ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// El inventario (autoritativo, #21C) va PRIMERO. Las lecturas de
+// ventas de un escaneo esperan a que termine la fase de inventario de ESE
+// escaneo (éxito o falla — nunca bloquea para siempre). Un escaneo que ya
+// no es el vigente nunca arranca ventas. Solo cambia CUÁNDO empiezan.
+function psSalesHoldUntilInventory(st){
+  if (!st) return;
+  st.inventorySettled = new Promise(function(resolve){ st.releaseSales = resolve; });
+}
+function psSalesReleaseAfterInventory(st){
+  if (st && typeof st.releaseSales === 'function') st.releaseSales();
+}
+function psSalesAfterInventory(upcClean, skus){
+  var st = window._psSales;
+  if (!st || !upcClean || st.upc !== upcClean) return;
+  (st.inventorySettled || Promise.resolve()).then(function(){
+    if (window._psSales === st) psRequestSavvySales(upcClean, skus);
+  });
+}
+
 async function psReadSavvySales(st, k){
   var e = st.skus[k], result;
   try {
@@ -7652,6 +7672,8 @@ async function psCheckSellbrite(upc, brand){
   var sbSeq = ++_psSbSeq;
   window._psSbState = { upc: String(upc || '').replace(/\D/g,''), state: 'loading' };
   psSalesReset(window._psSbState.upc);   // #22B: ventas propias, nuevo escaneo
+  var salesSt = window._psSales;          // #22C-0A: ventas esperan al inventario
+  psSalesHoldUntilInventory(salesSt);
   // RAILWAY_SB URLs now use SAVVY_API for staging
   try{
     const upcClean = String(upc).replace(/\D/g,'');
@@ -7671,6 +7693,7 @@ async function psCheckSellbrite(upc, brand){
     window._psSbState = { upc: upcClean, state: 'ok' };
 
     if(res.status === 404 || data.status === 'not_found' || !data.products || !data.products.length){
+      psSalesReleaseAfterInventory(salesSt);   // #22C-0A: no hay inventario que leer
       // No está en Sellbrite — consultar ShipStation por UPC de todas formas
       // (el aviso de eBay, si lo hay, se sigue mostrando arriba — fase 2).
       statusEl.innerHTML = '<div id="ps-existing-product-slot">' + psCombinedExistingWarningHtml() + '</div>'
@@ -7735,12 +7758,15 @@ async function psCheckSellbrite(upc, brand){
     window._psSbExisting = sbExisting;
     window._psSbExistingListings = sbListings;
     // #22B (solo pantalla): ventas propias por cada SKU exacto encontrado.
-    psRequestSavvySales(upcClean, sbListings.map(function(l){ return l.sku; }));
+    // #22C-0A: se piden DESPUÉS de que termine la fase de inventario.
+    psSalesAfterInventory(upcClean, sbListings.map(function(l){ return l.sku; }));
     // #21C/#21D: /sb/search solo dice QUÉ SKUs existen; la cantidad de cada
     // uno se confirma con /sb/inventory. Se arranca AQUÍ (síncrono: marca
     // "consultando" antes de pintar cualquier tarjeta o aviso; ninguna
     // respuesta se aplica antes de que termine este bloque síncrono).
     var _invLoad = psLoadSbInventory(upcClean, products.map(function(p){ return p.sku; }), sbSeq);
+    Promise.resolve(_invLoad).then(function(){ psSalesReleaseAfterInventory(salesSt); },
+                                   function(){ psSalesReleaseAfterInventory(salesSt); });
     if (!window._splitActive) window._splitActive = {1:true,2:false,3:true,4:false,5:false,6:true,7:false,8:false,9:false,10:false,11:false,12:true};
 
     // 17 sep 2026 — Investigación #5. psCheckSellbrite() corre en CADA
@@ -7865,6 +7891,7 @@ async function psCheckSellbrite(upc, brand){
     if (window._psDebug) window._psDebug('❌ psCheckSellbrite falló: ' + errDetail);
     if (sbSeq !== _psSbSeq) return;
     window._psSbState = { upc: String(upc || '').replace(/\D/g,''), state: 'error' };
+    psSalesReleaseAfterInventory(salesSt);   // #22C-0A: sin fase de inventario
     statusEl.innerHTML = '<div id="ps-existing-product-slot">' + psCombinedExistingWarningHtml() + '</div>'
       + '<span style="color:var(--mu)">⚠️ No se pudo consultar Sellbrite (' + esc(errDetail) + ')</span>';
     psRenderExistingProductWarning();
