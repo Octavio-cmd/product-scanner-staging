@@ -7090,6 +7090,8 @@ async function psCheckEbaySellerListings(upc, brand, title){
   listings.forEach(function(l){ if (l.pack != null && PACK_SIZES.indexOf(l.pack) !== -1 && psEbStatusIsLive(l.listing_status)) ebExisting[l.pack] = true; });
   window._psEbExisting = ebExisting;
   window._psEbSeller = { upc: upcClean, state: 'ok', listings: listings, error: '' };
+  // #22B (solo pantalla): SKUs exactos de listados propios que Sellbrite no tenga.
+  psRequestSavvySales(upcClean, listings.map(function(l){ return l.sku; }));
   psAutoExcludeConfirmedPacks(ebExisting, upcClean, 'eBay');
   psRenderExistingProductWarning();
   psRefreshPackLocks(upcClean);
@@ -7459,6 +7461,165 @@ function psPackBadgeHtml(st){
 // ── SELLBRITE + SHIPSTATION — ¿ya existe este producto? ¿dónde está? ──
 // Portado del módulo Inventory Manager (mismo Railway backend, endpoints
 // /sb/search y /ss/location).
+// ━━ VENTAS PROPIAS DE SAVVY EN EBAY POR SKU EXACTO (Implementación #22B) ━━
+// SOLO PANTALLA. Lee GET /ebay/savvy-sales?sku=<SKU exacto> (backend #22A)
+// para cada SKU exacto YA descubierto en este escaneo (Sellbrite /sb/search
+// y listados propios de eBay /ebay/seller-listings). Nada de esto entra a
+// Bulk Split, al tier de demanda, al CSV ni a ningún otro cálculo.
+//  - Un SKU exacto = una sola consulta por escaneo; nunca se suman SKUs.
+//  - Mientras carga no se muestra 0; una lectura no confirmada (error,
+//    status≠confirmed, complete≠true, respuesta inválida) muestra
+//    "⚠️ Ventas no confirmadas" — nunca 0.
+//  - packs_sold es BRUTO: incluye órdenes con reembolso (no se resta nada).
+//  - window._psSales es el token del escaneo: psCheckSellbrite() lo
+//    reemplaza en cada escaneo, así que una respuesta tardía de otro UPC o
+//    de un escaneo anterior del mismo UPC no pinta nada.
+//  - El precio promedio NO se muestra (el backend lo devuelve null a
+//    propósito hasta confirmar la semántica del campo de eBay).
+window._psSales = { upc: '', skus: {}, order: [] };
+var PS_SALES_WINDOWS = ['7d', '30d', '90d'];
+var PS_SALES_EXCLUDED_LABELS = {
+  cancelled: 'cancelled', cancel_in_progress: 'cancel in progress',
+  payment_pending: 'payment pending', payment_failed: 'payment failed'
+};
+
+function psSalesReset(upcClean){
+  window._psSales = { upc: String(upcClean || ''), skus: {}, order: [] };
+  psRenderSavvySales();
+  return window._psSales;
+}
+
+function psSalesFresh(st){
+  if (window._psSales !== st) return false;
+  var cu = (typeof cur !== 'undefined' && cur && cur.upc) ? String(cur.upc).replace(/\D/g, '') : '';
+  return !(cu && cu !== st.upc);
+}
+
+// skus: SKUs exactos conocidos para ESTE UPC (nunca se inventa uno).
+function psRequestSavvySales(upcClean, skus){
+  var st = window._psSales;
+  if (!st || !upcClean || st.upc !== upcClean) return;
+  var added = false;
+  (skus || []).forEach(function(sku){
+    var s = String(sku || '').trim();
+    var k = psSbInvKey(s);
+    if (!k || st.skus[k] || !psSkuHasUpc(s, upcClean)) return;
+    st.skus[k] = { sku: s, pack: psParseSellbritePack(s, upcClean), state: 'loading' };
+    st.order.push(k);
+    added = true;
+    psReadSavvySales(st, k);
+  });
+  if (added) psRenderSavvySales();
+}
+
+async function psReadSavvySales(st, k){
+  var e = st.skus[k], result;
+  try {
+    var res = await psAuthFetch('/ebay/savvy-sales?sku=' + encodeURIComponent(e.sku));
+    var body = null;
+    try { body = await res.json(); } catch(x) { body = null; }
+    result = psParseSavvySales(e.sku, res.status, body);
+  } catch(err) {
+    result = { state: 'error', reason: (err && err.code === 'auth_error') ? 'sesion_expirada'
+      : ((err && err.code) || 'network_error') };
+  }
+  if (!psSalesFresh(st) || st.skus[k] !== e) return;
+  st.skus[k] = Object.assign({ sku: e.sku, pack: e.pack }, result);
+  psRenderSavvySales();
+}
+
+function psSalesCount(v){ return typeof v === 'number' && isFinite(v) && v >= 0 && Math.floor(v) === v; }
+
+// Solo un resultado confirmado Y completo, con todas las ventanas bien
+// formadas, cuenta como ventas reales (incluido el cero confirmado).
+function psParseSavvySales(sku, status, body){
+  var bad = { state: 'error', reason: 'respuesta_invalida' };
+  if (!body || typeof body !== 'object') return (status >= 200 && status < 300) ? bad : { state: 'error', reason: 'http_' + status };
+  if (status !== 200 || body.status !== 'confirmed' || body.complete !== true) {
+    return { state: 'error', reason: String(body.reason || body.error || ('http_' + status)) };
+  }
+  if (psSbInvKey(body.sku) !== psSbInvKey(sku) || !body.windows || typeof body.windows !== 'object') return bad;
+  var pack = (psSalesCount(body.pack_size) && body.pack_size >= 1 && body.pack_size <= 12) ? body.pack_size : null;
+  var windows = {};
+  for (var i = 0; i < PS_SALES_WINDOWS.length; i++) {
+    var w = body.windows[PS_SALES_WINDOWS[i]];
+    if (!w || !psSalesCount(w.orders) || !psSalesCount(w.packs_sold)
+        || typeof w.packs_per_day !== 'number' || !isFinite(w.packs_per_day) || w.packs_per_day < 0
+        || !w.refunds || !psSalesCount(w.refunds.orders_with_refunds)
+        || !w.excluded || typeof w.excluded !== 'object') return bad;
+    var excl = [];
+    var ek = Object.keys(w.excluded);
+    for (var j = 0; j < ek.length; j++) {
+      var x = w.excluded[ek[j]];
+      if (!x || !psSalesCount(x.orders) || !psSalesCount(x.packs)) return bad;
+      if (x.orders || x.packs) excl.push({ kind: ek[j], orders: x.orders, packs: x.packs });
+    }
+    windows[PS_SALES_WINDOWS[i]] = {
+      orders: w.orders, packs: w.packs_sold, perDay: w.packs_per_day,
+      units: (pack && psSalesCount(w.physical_units) && w.physical_units === w.packs_sold * pack) ? w.physical_units : null,
+      refundedOrders: w.refunds.orders_with_refunds, excluded: excl
+    };
+  }
+  return { state: 'ok', packSize: pack, asOf: String(body.as_of || ''), windows: windows };
+}
+
+function psSalesPlural(n, one, many){ return n + ' ' + (n === 1 ? one : many); }
+
+function psSavvySalesWindowHtml(name, w, pack){
+  var h = '<div>' + name + ': <strong>' + w.packs + '</strong> gross packs sold · '
+    + psSalesPlural(w.orders, 'order', 'orders') + ' · ' + w.perDay.toFixed(2) + ' packs/day'
+    + ((w.units != null && pack > 1) ? ' <span style="color:var(--mu)">(= ' + w.units + ' physical units)</span>' : '')
+    + '</div>';
+  if (w.refundedOrders > 0) {
+    h += '<div style="font-size:11px;color:#ffab00;margin-left:10px">⚠️ '
+      + psSalesPlural(w.refundedOrders, 'refunded order', 'refunded orders') + ' included in gross sales</div>';
+  }
+  if (w.excluded.length) {
+    h += '<div style="font-size:11px;color:var(--mu);margin-left:10px">Excluded: '
+      + w.excluded.map(function(x){
+          return psSalesPlural(x.orders, esc(PS_SALES_EXCLUDED_LABELS[x.kind] || x.kind) + ' order', esc(PS_SALES_EXCLUDED_LABELS[x.kind] || x.kind) + ' orders')
+            + ' / ' + psSalesPlural(x.packs, 'pack', 'packs');
+        }).join(' · ') + '</div>';
+  }
+  return h;
+}
+
+function psSavvySalesHtml(){
+  var st = window._psSales || {};
+  // Solo el producto en pantalla: un producto sin UPC (o de otro UPC) nunca
+  // hereda las ventas del escaneo anterior.
+  var cu = (typeof cur !== 'undefined' && cur && cur.upc) ? String(cur.upc).replace(/\D/g, '') : '';
+  if (!st.order || !st.order.length || cu !== st.upc) return '';
+  var keys = st.order.slice().sort(function(a, b){
+    var pa = st.skus[a].pack, pb = st.skus[b].pack;
+    if ((pa == null) !== (pb == null)) return pa == null ? 1 : -1;
+    if (pa !== pb) return pa - pb;
+    return a < b ? -1 : (a > b ? 1 : 0);
+  });
+  var h = '<div id="ps-savvy-sales-card" style="background:var(--sf2);border-radius:10px;padding:10px;font-size:12px;line-height:1.7;margin-top:8px">'
+    + '<div style="font-weight:800">📊 SAVVY SALES — EBAY <span style="font-weight:400;color:var(--mu)">(ventas propias por SKU exacto)</span></div>'
+    + '<div style="font-size:11px;color:var(--mu)">Gross packs sold: incluye órdenes con reembolso. Ventanas acumuladas (7d ⊂ 30d ⊂ 90d): no se suman.</div>';
+  keys.forEach(function(k){
+    var e = st.skus[k];
+    h += '<div style="margin-top:6px;padding-top:6px;border-top:1px solid var(--bd)">'
+      + '<strong>' + (e.pack ? e.pack + 'pk' : 'pack ?') + '</strong> <span style="font-family:monospace;color:var(--ac)">' + esc(e.sku) + '</span>';
+    if (e.state === 'loading') {
+      h += '<div style="color:var(--mu)">⏳ Consultando ventas reales...</div>';
+    } else if (e.state !== 'ok') {
+      h += '<div style="color:#ffab00">⚠️ Ventas no confirmadas <span style="color:var(--mu);font-size:11px">(' + esc(e.reason || 'desconocido') + ')</span></div>';
+    } else {
+      PS_SALES_WINDOWS.forEach(function(n){ h += psSavvySalesWindowHtml(n, e.windows[n], e.packSize); });
+    }
+    h += '</div>';
+  });
+  return h + '</div>';
+}
+
+function psRenderSavvySales(){
+  var el = $('ps-savvy-sales-slot');
+  if (el) el.innerHTML = psSavvySalesHtml();
+}
+
 async function psCheckSellbrite(upc, brand){
   const statusEl = $('ps-sellbrite-status');
   if(!statusEl) return;
@@ -7470,6 +7631,7 @@ async function psCheckSellbrite(upc, brand){
   // pintar ni excluir nada en el producto actual.
   var sbSeq = ++_psSbSeq;
   window._psSbState = { upc: String(upc || '').replace(/\D/g,''), state: 'loading' };
+  psSalesReset(window._psSbState.upc);   // #22B: ventas propias, nuevo escaneo
   // RAILWAY_SB URLs now use SAVVY_API for staging
   try{
     const upcClean = String(upc).replace(/\D/g,'');
@@ -7552,6 +7714,8 @@ async function psCheckSellbrite(upc, brand){
     });
     window._psSbExisting = sbExisting;
     window._psSbExistingListings = sbListings;
+    // #22B (solo pantalla): ventas propias por cada SKU exacto encontrado.
+    psRequestSavvySales(upcClean, sbListings.map(function(l){ return l.sku; }));
     // #21C/#21D: /sb/search solo dice QUÉ SKUs existen; la cantidad de cada
     // uno se confirma con /sb/inventory. Se arranca AQUÍ (síncrono: marca
     // "consultando" antes de pintar cualquier tarjeta o aviso; ninguna
@@ -9711,13 +9875,17 @@ function renderResult(r){
       </a>`;
     }
     if (ebay.activeListings > 0) {
-      const soldTop = ebay.pricing && ebay.pricing.sold;
+      // #22B: se quitó la línea "✅ Sold (90d)" — ebay.pricing.sold es un
+      // marcador fijo {avg:0,count:0} (nunca hubo fuente real). El valor
+      // interno NO se toca (Bulk Split / veredicto lo siguen leyendo igual);
+      // solo deja de mostrarse como si fuera una venta real.
       mh += `<div style="background:var(--sf2);border-radius:10px;padding:10px;font-size:12px;line-height:1.8">
         🏷 <strong>Active BIN:</strong> ${ebay.activeListings}
         &nbsp;|&nbsp; Min: <strong>${fmt(low)}</strong> · Avg: <strong>${fmt(avg)}</strong> · Max: ${fmt(ebay.prices&&ebay.prices.high)}
-        ${soldTop?`<br>✅ <strong>Sold (90d):</strong> ${soldTop.count} · Avg: ${fmt(soldTop.avg)}`:''}
       </div>`;
     }
+    // #22B: ventas PROPIAS reales por SKU exacto (se llena desde psCheckSellbrite).
+    mh += '<div id="ps-savvy-sales-slot">' + psSavvySalesHtml() + '</div>';
     mh += `<div class="price-row" style="margin-top:8px">
       <div class="pc editable" onclick="editLowPrice()"><div class="lbl">eBay Lowest<br><span style="font-size:9px;color:var(--mu)">(item+ship, NEW)</span></div><div class="pc-num low">${low>0?fmt(low):'—'}</div></div>
       <div class="pc"><div class="lbl">eBay Avg<br><span style="font-size:9px;color:var(--mu)">(item+ship)</span></div><div class="pc-num avg">${avg>0?fmt(avg):'—'}</div></div>

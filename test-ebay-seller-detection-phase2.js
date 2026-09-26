@@ -439,7 +439,8 @@ section('24 — no eBay write endpoints');
   const fnSrc = sandbox.psCheckEbaySellerListings.toString();
   checkTrue('no Trading/revise/restock/end/relist/quantity-update in lookup code',
     !/ReviseItem|EndItem|RelistItem|AddItem|api\.ebay\.com|ws\/api\.dll|method:\s*['"](POST|PUT|PATCH|DELETE)/i.test(fnSrc));
-  checkTrue('no other ebay/* endpoint in app.js', (appSrc.match(/\/ebay\/[a-z-]+/g) || []).every(s => s === '/ebay/seller-listings'));
+  // #22B: /ebay/savvy-sales is the other approved READ (own sales, GET only).
+  checkTrue('no other ebay/* endpoint in app.js', (appSrc.match(/\/ebay\/[a-z-]+/g) || []).every(s => s === '/ebay/seller-listings' || s === '/ebay/savvy-sales'));
 }
 
 section('25 — source provenance preserved');

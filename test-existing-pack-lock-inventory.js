@@ -546,7 +546,8 @@ section('33 — CSV for a completely new product byte-equivalent to 4e47c34');
 }
 
 section('SAFETY — no eBay write, no new endpoint');
-checkTrue('only /sb/update-inventory is written', !/\/sb\/update-inventory-|\/ebay\/(?!seller-listings)[a-z-]+/.test(appSrc));
+// #22B: /ebay/savvy-sales is an approved READ-only endpoint (GET, own sales).
+checkTrue('only /sb/update-inventory is written', !/\/sb\/update-inventory-|\/ebay\/(?!seller-listings|savvy-sales)[a-z-]+/.test(appSrc));
 checkTrue('no Trading/revise/end/relist in app.js', !/ReviseItem|EndItem|RelistItem|ReviseInventoryStatus|ws\/api\.dll/.test(appSrc));
 
 section('SUMMARY');
