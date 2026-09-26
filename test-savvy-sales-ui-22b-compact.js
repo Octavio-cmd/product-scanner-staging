@@ -377,7 +377,11 @@ vm.runInContext('savvySesionCaducada = function(){ __exp.n++; };', Object.assign
 
 // Pre-change sources for "unchanged" guards.
 let baseSrc = null;
-try { baseSrc = require('child_process').execSync('git show 66c976555be423d667377ff918f77a4e9c48dd7b:app.js', { cwd: __dirname, encoding: 'utf8', maxBuffer: 64 << 20 }); } catch (e) { baseSrc = null; }
+// Employee STAGING: the Preview commit (66c9765) is not in this repo's history;
+// dcc8cd4 is the staging commit whose app.js is byte-identical to it (#22B before #22B-UI).
+for (const sha of ['66c976555be423d667377ff918f77a4e9c48dd7b', 'dcc8cd4e58d3e75fdec3de88d28840255581c317']) {
+  try { baseSrc = require('child_process').execSync('git show ' + sha + ':app.js', { cwd: __dirname, encoding: 'utf8', maxBuffer: 64 << 20, stdio: ['ignore', 'pipe', 'ignore'] }); break; } catch (e) { baseSrc = null; }
+}
 function fnSrc(src, name) {
   const re = new RegExp('^(async )?function ' + name + '\\(', 'm'); const m = re.exec(src); if (!m) return null;
   const rest = src.slice(m.index + 1); const n = /^(async )?function |^\/\/ ━━|^var |^const |^let |^window\./m.exec(rest.slice(1));
