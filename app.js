@@ -6273,8 +6273,7 @@ function renderSplitCalculatorHTML(ebay){
       <div style="font-size:11px;color:var(--mu);margin-top:5px">Se suma el peso de la caja según el tamaño (2-12 oz). El envío es un estimado (promedio USPS/UPS a todo EE.UU.).</div>
     </div>
     <div style="margin-top:8px;font-size:12px;color:var(--mu)">
-      Demanda detectada: <strong id="split-tier-label" style="color:var(--ac)"></strong>
-      (${soldCount} vendidos en 90 días)
+      Demanda automática actual: <strong id="split-tier-label" style="color:var(--ac)"></strong>
       — <span style="text-decoration:underline;cursor:pointer;color:var(--ac)" onclick="cycleSplitTier()">cambiar</span>
     </div>
     <div id="split-results" style="margin-top:12px"></div>
@@ -7565,23 +7564,39 @@ function psParseSavvySales(sku, status, body){
 
 function psSalesPlural(n, one, many){ return n + ' ' + (n === 1 ? one : many); }
 
-function psSavvySalesWindowHtml(name, w, pack){
-  var h = '<div>' + name + ': <strong>' + w.packs + '</strong> gross packs sold · '
-    + psSalesPlural(w.orders, 'order', 'orders') + ' · ' + w.perDay.toFixed(2) + ' packs/day'
-    + ((w.units != null && pack > 1) ? ' <span style="color:var(--mu)">(= ' + w.units + ' physical units)</span>' : '')
-    + '</div>';
+// #22B-UI: tabla compacta — una fila por SKU exacto, una columna por ventana.
+// En pantallas angostas (<480px) cada fila se vuelve una tarjeta apilada
+// (@media + data-label); si aun así no cabe, el scroll horizontal queda
+// DENTRO del panel (overflow-x:auto), nunca en la página.
+var PS_SALES_CSS = '<style>'
+  + '#ps-savvy-sales-table{width:100%;border-collapse:collapse;font-size:12px}'
+  + '#ps-savvy-sales-table th{text-align:left;font-size:11px;color:var(--mu);font-weight:700;padding:4px 6px;border-bottom:1px solid var(--bd)}'
+  + '#ps-savvy-sales-table td{vertical-align:top;padding:6px;border-bottom:1px solid var(--bd)}'
+  + '#ps-savvy-sales-table .ps-ss-n{font-size:15px;font-weight:800}'
+  + '#ps-savvy-sales-table .ps-ss-sub{font-size:11px;color:var(--mu);line-height:1.4}'
+  + '#ps-savvy-sales-table .ps-ss-warn{font-size:11px;color:#ffab00;line-height:1.4}'
+  + '@media (max-width:480px){'
+  + '#ps-savvy-sales-table thead{display:none}'
+  + '#ps-savvy-sales-table tr{display:block;border-bottom:1px solid var(--bd);padding:4px 0}'
+  + '#ps-savvy-sales-table td{display:block;border:none;padding:3px 6px}'
+  + '#ps-savvy-sales-table td[data-label]::before{content:attr(data-label);display:inline-block;min-width:38px;font-weight:700;color:var(--mu)}'
+  + '}</style>';
+
+function psSavvySalesCellHtml(name, w, pack){
+  var h = '<td data-label="' + name.toUpperCase() + '" class="ps-ss-cell">'
+    + '<span class="ps-ss-n">' + w.packs + '</span> packs'
+    + '<div class="ps-ss-sub">' + psSalesPlural(w.orders, 'order', 'orders') + ' · ' + w.perDay.toFixed(2) + ' packs/day</div>';
+  if (w.units != null && pack > 1) h += '<div class="ps-ss-sub">= ' + w.units + ' physical units</div>';
   if (w.refundedOrders > 0) {
-    h += '<div style="font-size:11px;color:#ffab00;margin-left:10px">⚠️ '
-      + psSalesPlural(w.refundedOrders, 'refunded order', 'refunded orders') + ' included in gross sales</div>';
+    h += '<div class="ps-ss-warn">⚠️ ' + psSalesPlural(w.refundedOrders, 'refunded order', 'refunded orders') + ' included</div>';
   }
   if (w.excluded.length) {
-    h += '<div style="font-size:11px;color:var(--mu);margin-left:10px">Excluded: '
-      + w.excluded.map(function(x){
-          return psSalesPlural(x.orders, esc(PS_SALES_EXCLUDED_LABELS[x.kind] || x.kind) + ' order', esc(PS_SALES_EXCLUDED_LABELS[x.kind] || x.kind) + ' orders')
-            + ' / ' + psSalesPlural(x.packs, 'pack', 'packs');
-        }).join(' · ') + '</div>';
+    h += '<div class="ps-ss-sub">Excluded: ' + w.excluded.map(function(x){
+      var lbl = esc(PS_SALES_EXCLUDED_LABELS[x.kind] || x.kind);
+      return psSalesPlural(x.orders, lbl + ' order', lbl + ' orders') + ' / ' + psSalesPlural(x.packs, 'pack', 'packs');
+    }).join(' · ') + '</div>';
   }
-  return h;
+  return h + '</td>';
 }
 
 function psSavvySalesHtml(){
@@ -7596,23 +7611,28 @@ function psSavvySalesHtml(){
     if (pa !== pb) return pa - pb;
     return a < b ? -1 : (a > b ? 1 : 0);
   });
-  var h = '<div id="ps-savvy-sales-card" style="background:var(--sf2);border-radius:10px;padding:10px;font-size:12px;line-height:1.7;margin-top:8px">'
-    + '<div style="font-weight:800">📊 SAVVY SALES — EBAY <span style="font-weight:400;color:var(--mu)">(ventas propias por SKU exacto)</span></div>'
-    + '<div style="font-size:11px;color:var(--mu)">Gross packs sold: incluye órdenes con reembolso. Ventanas acumuladas (7d ⊂ 30d ⊂ 90d): no se suman.</div>';
+  var h = '<div id="ps-savvy-sales-card" style="background:var(--sf2);border-radius:10px;padding:10px;font-size:12px;line-height:1.5;margin-top:8px">'
+    + PS_SALES_CSS
+    + '<div style="font-weight:800">📊 SAVVY SALES — EBAY</div>'
+    + '<div style="font-size:11px;color:var(--mu);margin-bottom:6px">Own eBay sales by exact SKU · Gross packs sold · refunded orders remain included · 7d ⊂ 30d ⊂ 90d are rolling nested windows: do not add them together.</div>'
+    + '<div id="ps-savvy-sales-scroll" style="overflow-x:auto;-webkit-overflow-scrolling:touch;max-width:100%">'
+    + '<table id="ps-savvy-sales-table"><thead><tr><th>SKU / Pack</th>'
+    + PS_SALES_WINDOWS.map(function(n){ return '<th>' + n.toUpperCase() + '</th>'; }).join('')
+    + '</tr></thead><tbody>';
   keys.forEach(function(k){
     var e = st.skus[k];
-    h += '<div style="margin-top:6px;padding-top:6px;border-top:1px solid var(--bd)">'
-      + '<strong>' + (e.pack ? e.pack + 'pk' : 'pack ?') + '</strong> <span style="font-family:monospace;color:var(--ac)">' + esc(e.sku) + '</span>';
+    h += '<tr data-sku="' + esc(e.sku) + '"><td class="ps-ss-sku"><strong>' + (e.pack ? e.pack + 'pk' : 'pack ?') + '</strong>'
+      + '<div style="font-family:monospace;font-size:11px;color:var(--ac);word-break:break-all">' + esc(e.sku) + '</div></td>';
     if (e.state === 'loading') {
-      h += '<div style="color:var(--mu)">⏳ Consultando ventas reales...</div>';
+      h += '<td colspan="3" class="ps-ss-sub">⏳ Consultando ventas reales...</td>';
     } else if (e.state !== 'ok') {
-      h += '<div style="color:#ffab00">⚠️ Ventas no confirmadas <span style="color:var(--mu);font-size:11px">(' + esc(e.reason || 'desconocido') + ')</span></div>';
+      h += '<td colspan="3" class="ps-ss-warn">⚠️ Ventas no confirmadas <span class="ps-ss-sub">(' + esc(e.reason || 'desconocido') + ')</span></td>';
     } else {
-      PS_SALES_WINDOWS.forEach(function(n){ h += psSavvySalesWindowHtml(n, e.windows[n], e.packSize); });
+      PS_SALES_WINDOWS.forEach(function(n){ h += psSavvySalesCellHtml(n, e.windows[n], e.packSize); });
     }
-    h += '</div>';
+    h += '</tr>';
   });
-  return h + '</div>';
+  return h + '</tbody></table></div></div>';
 }
 
 function psRenderSavvySales(){
