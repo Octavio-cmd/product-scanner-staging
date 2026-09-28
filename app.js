@@ -7483,6 +7483,7 @@ var PS_SALES_EXCLUDED_LABELS = {
 };
 
 function psSalesReset(upcClean){
+  psSalesWarmCancel(window._psSales);   // #22C-0B3: el escaneo anterior deja de reintentar
   window._psSales = { upc: String(upcClean || ''), skus: {}, order: [] };
   psRenderSavvySales();
   return window._psSales;
@@ -7543,6 +7544,10 @@ async function psReadSavvySales(st, k){
       : ((err && err.code) || 'network_error') };
   }
   if (!psSalesFresh(st) || st.skus[k] !== e) return;
+  // #22C-0B3: "warming" reintenta solo (acotado); agotado el límite → no confirmadas.
+  if (result.state === 'warming' && !psSalesWarmSchedule(st, k, result.retryAfter)) {
+    result = { state: 'error', reason: 'sales_snapshot_warming_timeout' };
+  }
   st.skus[k] = Object.assign({ sku: e.sku, pack: e.pack }, result);
   psRenderSavvySales();
 }
@@ -7555,6 +7560,7 @@ function psParseSavvySales(sku, status, body){
   var bad = { state: 'error', reason: 'respuesta_invalida' };
   if (!body || typeof body !== 'object') return (status >= 200 && status < 300) ? bad : { state: 'error', reason: 'http_' + status };
   if (status !== 200 || body.status !== 'confirmed' || body.complete !== true) {
+    if (psSalesIsWarming(body)) return { state: 'warming', retryAfter: body.retry_after_seconds };   // #22C-0B3
     return { state: 'error', reason: String(body.reason || body.error || ('http_' + status)) };
   }
   if (psSbInvKey(body.sku) !== psSbInvKey(sku) || !body.windows || typeof body.windows !== 'object') return bad;
@@ -7579,7 +7585,10 @@ function psParseSavvySales(sku, status, body){
       refundedOrders: w.refunds.orders_with_refunds, excluded: excl
     };
   }
-  return { state: 'ok', packSize: pack, asOf: String(body.as_of || ''), windows: windows };
+  var ok = { state: 'ok', packSize: pack, asOf: String(body.as_of || ''), windows: windows };
+  var fresh = psSalesFreshness(body);   // #22C-0B3: solo si el backend manda la edad
+  if (fresh) ok.freshness = fresh;
+  return ok;
 }
 
 function psSalesPlural(n, one, many){ return n + ' ' + (n === 1 ? one : many); }
@@ -7642,9 +7651,13 @@ function psSavvySalesHtml(){
   keys.forEach(function(k){
     var e = st.skus[k];
     h += '<tr data-sku="' + esc(e.sku) + '"><td class="ps-ss-sku"><strong>' + (e.pack ? e.pack + 'pk' : 'pack ?') + '</strong>'
-      + '<div style="font-family:monospace;font-size:11px;color:var(--ac);word-break:break-all">' + esc(e.sku) + '</div></td>';
+      + '<div style="font-family:monospace;font-size:11px;color:var(--ac);word-break:break-all">' + esc(e.sku) + '</div>'
+      + ((e.state === 'ok' && e.freshness) ? '<div class="ps-ss-sub ps-ss-age">' + esc(psSalesFreshnessText(e.freshness)) + '</div>' : '')
+      + '</td>';
     if (e.state === 'loading') {
       h += '<td colspan="3" class="ps-ss-sub">⏳ Consultando ventas reales...</td>';
+    } else if (e.state === 'warming') {
+      h += '<td colspan="3" class="ps-ss-sub ps-ss-warming">⏳ Preparando ventas reales…<div>Actualizando automáticamente.</div></td>';
     } else if (e.state !== 'ok') {
       h += '<td colspan="3" class="ps-ss-warn">⚠️ Ventas no confirmadas <span class="ps-ss-sub">(' + esc(e.reason || 'desconocido') + ')</span></td>';
     } else {
@@ -12949,3 +12962,75 @@ function saveSheetsUrl() {
 }
 
 
+// ━━ #22C-0B3: VENTAS "WARMING" — REINTENTO AUTOMÁTICO ACOTADO + EDAD DE LA FOTO ━━
+// Backend #22C-0B2: /ebay/savvy-sales ya no espera el escaneo de 90 días; si
+// aún no hay foto confirmada responde status=unconfirmed,
+// reason=sales_snapshot_warming, refreshing=true, windows=null. Aquí:
+//  - Ese estado (y SOLO ese) se reintenta solo, por SKU exacto: el primero a
+//    los 2 s, luego cada 3 s; como máximo 30 reintentos Y 90 s desde el primer
+//    "warming". Agotado el límite → "⚠️ Ventas no confirmadas" (volver a
+//    escanear). Un error, un fallo con espera (retry_after_seconds con otro
+//    reason) o una respuesta inválida NO se reintentan.
+//  - retry_after_seconds (si viene en un "warming") alarga la espera, con tope
+//    de 10 s; nunca la acorta.
+//  - Un solo ciclo por escaneo + SKU exacto (st.warmLoops[k]); un escaneo
+//    nuevo (aunque sea el mismo UPC) cancela los temporizadores del anterior y
+//    sus respuestas tardías no pintan nada (psSalesFresh).
+//  - Con snapshot_age_seconds se muestra una nota discreta de edad; sin esos
+//    campos (backend anterior) todo queda exactamente como #22B.
+// Solo pantalla: no toca inventario, SUMAR/REEMPLAZAR, ubicación, Bulk Split ni CSV.
+var PS_SALES_WARM_FIRST_MS = 2000;
+var PS_SALES_WARM_EVERY_MS = 3000;
+var PS_SALES_WARM_MAX_TRIES = 30;
+var PS_SALES_WARM_MAX_MS = 90000;
+var PS_SALES_WARM_RETRY_AFTER_MAX_MS = 10000;
+
+function psSalesIsWarming(body){
+  return !!body && body.status === 'unconfirmed' && body.complete !== true
+    && body.reason === 'sales_snapshot_warming' && body.refreshing === true && body.windows == null;
+}
+
+function psSalesFreshness(body){
+  var a = body && body.snapshot_age_seconds;
+  if (typeof a !== 'number' || !isFinite(a) || a < 0) return null;
+  return { ageSec: Math.floor(a), refreshing: body.refreshing === true };
+}
+
+function psSalesFreshnessText(f){
+  var m = Math.floor(f.ageSec / 60);
+  var edad = m < 1 ? 'menos de 1 min' : m + ' min';
+  return f.refreshing ? 'Datos de hace ' + edad + ' · actualizando…' : 'Datos actualizados hace ' + edad;
+}
+
+// true si quedó (o ya estaba) un reintento programado para este SKU.
+function psSalesWarmSchedule(st, k, retryAfterSec){
+  if (!st || !psSalesFresh(st)) return false;
+  var loops = st.warmLoops || (st.warmLoops = {});
+  var L = loops[k] || (loops[k] = { tries: 0, started: Date.now(), timer: null, done: false });
+  if (L.timer) return true;
+  var delay = L.tries === 0 ? PS_SALES_WARM_FIRST_MS : PS_SALES_WARM_EVERY_MS;
+  var ra = Number(retryAfterSec);
+  if (isFinite(ra) && ra > 0) delay = Math.max(delay, Math.min(ra * 1000, PS_SALES_WARM_RETRY_AFTER_MAX_MS));
+  if (L.done || L.tries >= PS_SALES_WARM_MAX_TRIES || Date.now() - L.started + delay > PS_SALES_WARM_MAX_MS) {
+    L.done = true;
+    return false;
+  }
+  L.tries++;
+  L.timer = setTimeout(function(){
+    L.timer = null;
+    if (L.done || !psSalesFresh(st) || !st.warmLoops || st.warmLoops[k] !== L) return;
+    var e = st.skus[k];
+    if (e && e.state === 'warming') psReadSavvySales(st, k);
+  }, delay);
+  return true;
+}
+
+function psSalesWarmCancel(st){
+  if (!st || !st.warmLoops) return;
+  Object.keys(st.warmLoops).forEach(function(k){
+    var L = st.warmLoops[k];
+    if (L.timer) clearTimeout(L.timer);
+    L.timer = null;
+    L.done = true;
+  });
+}

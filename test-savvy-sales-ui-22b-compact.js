@@ -205,6 +205,9 @@ vm.createContext(sandbox);
 
 const fixesSrc = fs.readFileSync(path.join(__dirname, 'multipack-fixes.js'), 'utf8');
 const appSrc = fs.readFileSync(process.env.PS22BC_APP || path.join(__dirname, 'app.js'), 'utf8');
+// #22C-0B3 (warming auto-retry + age note) is separately scoped: guards compare
+// app.js with exactly those edits reverted.
+const appSrcG = require('./scope-22c-0b3.js').undo22c0b3(appSrc);
 let loadError = null;
 try { vm.runInContext(fixesSrc, sandbox, { filename: 'multipack-fixes.js' }); } catch (e) { loadError = 'fixes: ' + e.message; }
 try { vm.runInContext(appSrc, sandbox, { filename: 'app.js' }); } catch (e) { loadError = (loadError ? loadError + ' | ' : '') + 'app.js: ' + e.message; }
@@ -387,7 +390,7 @@ function fnSrc(src, name) {
   const rest = src.slice(m.index + 1); const n = /^(async )?function |^\/\/ ━━|^var |^const |^let |^window\./m.exec(rest.slice(1));
   return src.slice(m.index, n ? m.index + 2 + n.index : undefined);
 }
-function unchangedFn(name) { return baseSrc != null && fnSrc(appSrc, name) != null && fnSrc(appSrc, name) === fnSrc(baseSrc, name); }
+function unchangedFn(name) { return baseSrc != null && fnSrc(appSrcG, name) != null && fnSrc(appSrcG, name) === fnSrc(baseSrc, name); }
 const block22b = (() => { const a = appSrc.indexOf('// ━━ VENTAS PROPIAS DE SAVVY EN EBAY POR SKU EXACTO (Implementación #22B)'); const b = appSrc.indexOf('async function psCheckSellbrite(', a); return a >= 0 && b > a ? appSrc.slice(a, b) : ''; })();
 
 const fetchPaths22b = (block22b.match(/psAuthFetch\(\s*'[^']*'/g) || []).map(x => x.replace(/psAuthFetch\(\s*'/, '').replace(/'$/, ''));
