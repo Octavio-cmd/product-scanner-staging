@@ -1,23 +1,22 @@
 #!/usr/bin/env node
 /**
- * INVENTORY FIRST, SAVVY SALES SECOND (Implementación #22C-0A)
+ * ONE SHARED SAVVY SALES WARMING PROBE PER SCAN (Implementación #22C-0C)
  *
- * Root cause (#22C-0): the backend serves 2 requests at a time; a cold
- * /ebay/savvy-sales scan can hold both for ~50 s, and the authoritative
- * /sb/inventory reads (#21C) queued behind it. Now each scan's Savvy Sales
- * reads start only after that scan's inventory phase SETTLES (success or
- * failure), and a scan that is no longer current never starts them.
- * Nothing else changes: same requests, same payloads, same UI, same
- * inventory / sales / Bulk Split behaviour — only WHEN sales reads begin.
+ * Backend c503df8: /ebay/savvy-sales = 30 requests / minute / session user;
+ * every exact-SKU read and every warming retry costs one unit. #22C-0B3 ran one
+ * warming loop PER SKU (4 cold SKUs ≈ 84 req/min → http_429 at ~20 s). Now one
+ * gate/probe per scan: the first exact SKU is read alone; if the shared B2
+ * snapshot is warming it is the ONLY poller (2 s, then 3 s, ≤30 retries,
+ * ≤90 s); when it confirms, every other exact SKU is read ONCE.
  *
- * Includes a deterministic performance harness: a mocked backend with
- * capacity 2 (FIFO), slow cold sales, fast inventory — run BEFORE (the
- * unmodified 77d3cab app.js, in a child process) and AFTER.
+ * The request-budget checks run the REAL scheduling code on a 1:100 clock
+ * (1 s → 10 ms): B3 timings, a cold snapshot that becomes ready at "50 s", and
+ * a mock of the backend fixed-window limiter (30 per "60 s"). Every sliding
+ * "60 s" window must hold ≤ 30 sales requests and no 429 may occur.
  *
- * Harness: real multipack-fixes.js + real app.js in a vm sandbox; only
- * fetch() is mocked. No real network, no writes.
+ * Harness: real multipack-fixes.js + real app.js in a vm sandbox (same as the
+ * #22C-0B3 suite); only fetch() is mocked.
  */
-
 const fs = require('fs');
 const vm = require('vm');
 const path = require('path');
@@ -204,15 +203,13 @@ sandbox.window = sandbox; sandbox.self = sandbox; sandbox.globalThis = sandbox;
 vm.createContext(sandbox);
 
 const fixesSrc = fs.readFileSync(path.join(__dirname, 'multipack-fixes.js'), 'utf8');
-const appSrc = fs.readFileSync(process.env.PS22C0A_APP || path.join(__dirname, 'app.js'), 'utf8');
+const appSrc = fs.readFileSync(process.env.PS22C0C_APP || path.join(__dirname, 'app.js'), 'utf8');
 // #22C-0B3 (warming auto-retry + age note) is separately scoped: guards compare
 // app.js with exactly those edits reverted.
-// #22C-0C (one shared warming probe per scan) and the Production-compatibility
-// hardening (Clothing Sheets URL, rembg warm-up, staging badge removed) are
-// separately scoped: revert exactly those edits first, then #22C-0B3.
+// #22C-0C (one shared warming probe per scan) is separately scoped: revert
+// exactly those edits first, then #22C-0B3.
 const appSrcC = require('./scope-22c-0c.js').undo22c0c(appSrc);
-const appSrcP = require('./scope-production-compat.js').undoProdCompat(appSrcC);
-const appSrcG = require('./scope-22c-0b3.js').undo22c0b3(appSrcP);
+const appSrcG = require('./scope-22c-0b3.js').undo22c0b3(appSrcC);
 let loadError = null;
 try { vm.runInContext(fixesSrc, sandbox, { filename: 'multipack-fixes.js' }); } catch (e) { loadError = 'fixes: ' + e.message; }
 try { vm.runInContext(appSrc, sandbox, { filename: 'app.js' }); } catch (e) { loadError = (loadError ? loadError + ' | ' : '') + 'app.js: ' + e.message; }
@@ -383,28 +380,6 @@ const LEGO_SALES = () => ({ [S1PK]: { body: LEGO_1PK() }, [S2PK]: { body: LEGO_2
 const expired = { n: 0 };
 vm.runInContext('savvySesionCaducada = function(){ __exp.n++; };', Object.assign(sandbox, { __exp: expired }));
 
-// Pre-change sources for "unchanged" guards.
-let baseSrc = null;
-// Employee STAGING: the Preview commit (66c9765) is not in this repo's history;
-// dcc8cd4 is the staging commit whose app.js is byte-identical to it (#22B before #22B-UI).
-for (const sha of ['66c976555be423d667377ff918f77a4e9c48dd7b', 'dcc8cd4e58d3e75fdec3de88d28840255581c317']) {
-  try { baseSrc = require('child_process').execSync('git show ' + sha + ':app.js', { cwd: __dirname, encoding: 'utf8', maxBuffer: 64 << 20, stdio: ['ignore', 'pipe', 'ignore'] }); break; } catch (e) { baseSrc = null; }
-}
-function fnSrc(src, name) {
-  const re = new RegExp('^(async )?function ' + name + '\\(', 'm'); const m = re.exec(src); if (!m) return null;
-  const rest = src.slice(m.index + 1); const n = /^(async )?function |^\/\/ ━━|^var |^const |^let |^window\./m.exec(rest.slice(1));
-  return src.slice(m.index, n ? m.index + 2 + n.index : undefined);
-}
-function unchangedFn(name) { return baseSrc != null && fnSrc(appSrcG, name) != null && fnSrc(appSrcG, name) === fnSrc(baseSrc, name); }
-const block22b = (() => { const a = appSrc.indexOf('// ━━ VENTAS PROPIAS DE SAVVY EN EBAY POR SKU EXACTO (Implementación #22B)'); const b = appSrc.indexOf('async function psCheckSellbrite(', a); return a >= 0 && b > a ? appSrc.slice(a, b) : ''; })();
-
-const fetchPaths22b = (block22b.match(/psAuthFetch\(\s*'[^']*'/g) || []).map(x => x.replace(/psAuthFetch\(\s*'/, '').replace(/'$/, ''));
-// ── "before" = Employee STAGING 77d3cab (inventory/sales order pre-#22C-0A) ──
-const BEFORE_SHA = '77d3cabb9a663d6e3b63ef841a074daea1e8a398';
-let beforeSrc = null;
-try { beforeSrc = require('child_process').execSync('git show ' + BEFORE_SHA + ':app.js', { cwd: __dirname, encoding: 'utf8', maxBuffer: 64 << 20, stdio: ['ignore', 'pipe', 'ignore'] }); } catch (e) { beforeSrc = null; }
-const sameAsBefore = name => beforeSrc != null && fnSrc(appSrcG, name) != null && fnSrc(appSrcG, name) === fnSrc(beforeSrc, name);
-
 // ── ordered request log + optional capacity-limited backend model ─────────
 const callLog = [];
 const origFetch = sandbox.fetch;
@@ -454,266 +429,257 @@ async function startLego(extra) {
   return p;
 }
 
-// ── deterministic performance model (capacity 2) ─────────────────────────
-const SALES_MS = 400, FAST_MS = 20;
-async function perfRun() {
+
+// ── #22C-0B3 helpers ──────────────────────────────────────────────────────
+const cp = require('child_process');
+const BASE_SHA = '574a351333432bf40b4a2e405f20f18e24ac81fd';
+let base574 = null;
+try { base574 = cp.execSync('git show ' + BASE_SHA + ':app.js', { cwd: __dirname, encoding: 'utf8', maxBuffer: 64 << 20, stdio: ['ignore', 'pipe', 'ignore'] }); } catch (e) { base574 = null; }
+let scope = null;
+try { scope = require('./scope-22c-0b3.js'); } catch (e) { scope = null; }
+function fnSrc(src, name) {
+  const re = new RegExp('^(async )?function ' + name + '\\(', 'm'); const m = re.exec(src); if (!m) return null;
+  const rest = src.slice(m.index + 1); const n = /^(async )?function |^\/\/ ━━|^var |^const |^let |^window\./m.exec(rest.slice(1));
+  return src.slice(m.index, n ? m.index + 2 + n.index : undefined);
+}
+const REAL = {};
+['PS_SALES_WARM_FIRST_MS', 'PS_SALES_WARM_EVERY_MS', 'PS_SALES_WARM_MAX_TRIES', 'PS_SALES_WARM_MAX_MS', 'PS_SALES_WARM_RETRY_AFTER_MAX_MS']
+  .forEach(k => { REAL[k] = sandbox[k]; });
+function setWarm(first, every, tries, maxMs, raMax) {
+  sandbox.PS_SALES_WARM_FIRST_MS = first; sandbox.PS_SALES_WARM_EVERY_MS = every;
+  sandbox.PS_SALES_WARM_MAX_TRIES = tries; sandbox.PS_SALES_WARM_MAX_MS = maxMs;
+  sandbox.PS_SALES_WARM_RETRY_AFTER_MAX_MS = raMax == null ? 10000 : raMax;
+}
+const FAST = () => setWarm(20, 30, 30, 90000, 150);
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+async function waitFor(cond, ms) { const t = Date.now(); while (Date.now() - t < (ms || 3000)) { if (cond()) return true; await sleep(5); } return !!cond(); }
+function warmBody(sku, over) {
+  return Object.assign({ sku, source: 'ebay_fulfillment_orders', match: 'exact_sku_case_insensitive', pack_size: null,
+    pack_size_reason: null, window_basis: 'order_creation_date_utc_rolling', status: 'unconfirmed', complete: false,
+    reason: 'sales_snapshot_warming', as_of: null, windows: null, snapshot_age_seconds: null, refreshing: true,
+    stale: null, retry_after_seconds: 0 }, over || {});
+}
+// A per-SKU response queue: each entry is { status, body } or a mode spec; the last one repeats.
+function seq(sku, list) {
+  const q = list.slice();
+  return { defer: async () => { const s = q.length > 1 ? q.shift() : q[0]; return salesBuild(sku, s); } };
+}
+const W = sku => ({ status: 503, body: warmBody(sku) });
+const OK1 = over => ({ status: 200, body: salesOk(S1PK, 1, win(48, 155, 22.143, 1, { excluded: { cancelled: { orders: 1, packs: 1 } } }),
+  win(105, 234, 7.8, 1, { excluded: { cancelled: { orders: 2, packs: 3 } }, refunded: 1 }),
+  win(136, 273, 3.033, 1, { excluded: { cancelled: { orders: 3, packs: 5 } }, refunded: 3 }), over) });
+const OK2 = over => ({ status: 200, body: salesOk(S2PK, 2, win(5, 15, 2.143, 2), win(7, 32, 1.067, 2), win(9, 38, 0.422, 2), over) });
+const salesOf = sku => salesCalls.filter(c => c.sku === sku).length;
+const entry = sku => (salesState().skus || {})[sandbox.psSbInvKey(sku)] || {};
+const loops = () => salesState().warmLoops || {};
+const armed = () => Object.values(loops()).filter(L => L.timer).length;
+async function start(sales, extra) {
   resetAll(); callLog.length = 0;
-  Object.assign(salesRead, LEGO_SALES());
+  Object.assign(salesRead, sales || {});
   setCur(fixture(LEG, 'LEGO')); setSplitActive(Object.assign({}, ALL_ON)); setSplitManual({});
-  sbConfig.products = LEGO_SB(); sbConfig.defer = null; ebConfig.listings = [];
-  invRead = Object.assign(invRead, LEGO_INV);
-  perf = { cap: 2, active: 0, queue: [], service: u => (u.includes('/ebay/savvy-sales') ? SALES_MS : FAST_MS) };
-  const t0 = Date.now();
-  let searchDone = null, invDone = null;
-  const run = Promise.all([sandbox.psCheckSellbrite(LEG, 'LEGO'), sandbox.psCheckEbaySellerListings(LEG, 'LEGO', '')]);
-  while (Date.now() - t0 < 10000) {
-    await new Promise(r => setTimeout(r, 2));
-    const inv = invStates();
-    if (searchDone == null && Object.keys(inv).length) searchDone = Date.now() - t0;
-    if (searchDone != null && invDone == null && !invPending()) invDone = Date.now() - t0;
-    const st = vm.runInContext('window._psSales || {skus:{}}', sandbox);
-    const salesDone = st.order && st.order.length === 3 && Object.values(st.skus).every(e => e.state !== 'loading');
-    if (invDone != null && salesDone) break;
+  sbConfig.products = LEGO_SB(); sbConfig.defer = null; ebConfig.listings = (extra && extra.eb) || [];
+  invRead = Object.assign(invRead, LEGO_INV, (extra && extra.inv) || {});
+  await Promise.all([sandbox.psCheckSellbrite(LEG, 'LEGO'), sandbox.psCheckEbaySellerListings(LEG, 'LEGO', '')]);
+  await settleSales();
+}
+const idle = () => armed() === 0 && !Object.values(salesState().skus || {}).some(e => e.state === 'loading');
+
+
+// ── #22C-0C helpers ───────────────────────────────────────────────────────
+const S3PK = 'LEG-673419373609-3pk', S6PK = 'LEG-673419373609-6pk';
+const SCALE = 100;                                   // 1 real second → 10 ms
+const SEC = s => Math.round(s * 1000 / SCALE);
+const B3_TIMINGS = () => setWarm(SEC(2), SEC(3), 30, SEC(90), SEC(10));
+// mock of the backend fixed-window limiter (per user, 30 per "60 s")
+let lim = null, salesTimes = [];
+const fetchInner = sandbox.fetch;
+sandbox.fetch = (url, opts) => {
+  const u = String(url);
+  if (u.indexOf('/ebay/savvy-sales') >= 0) {
+    const now = Date.now(); salesTimes.push(now);
+    if (lim) {
+      if (lim.start == null || now - lim.start >= lim.windowMs) { lim.start = now; lim.count = 0; }
+      if (++lim.count > lim.max) {
+        lim.hits++;
+        const sku = decodeURIComponent((u.match(/sku=([^&]+)/) || [])[1] || '');
+        salesCalls.push({ u, method: 'GET', sku, auth: opts && opts.headers && opts.headers.get && opts.headers.get('Authorization'), limited: true });
+        return Promise.resolve({ ok: false, status: 429, json: async () => { throw new SyntaxError('Unexpected token <'); } });
+      }
+    }
   }
-  await run.catch(() => {});
-  const total = Date.now() - t0;
-  const out = { skuDiscoveredMs: searchDone, inventoryConfirmedMs: invDone, allDoneMs: total,
-    order: callLog.filter(c => c.kind === 'inventory' || c.kind === 'sales').map(c => c.kind[0]).join(''),
-    counts: { search: countOf('search'), inventory: countOf('inventory'), sales: countOf('sales'), location: countOf('location'), sellerListings: countOf('seller-listings') },
-    invOk: Object.values(invStates()).every(a => a && a.state === 'ok') };
-  perf = null;
+  return fetchInner(url, opts);
+};
+function limiterOn() { lim = { windowMs: SEC(60), max: 30, start: null, count: 0, hits: 0 }; }
+function maxInWindow(times, win) { let m = 0; for (let i = 0; i < times.length; i++) { let c = 0; for (let j = i; j < times.length && times[j] - times[i] < win; j++) c++; m = Math.max(m, c); } return m; }
+// cold B2 snapshot: warming until `ready.t`, then each exact SKU's OWN confirmed body
+function cold(ready, sku, spec) { return { defer: async () => salesBuild(sku, Date.now() >= ready.t ? spec : W(sku)) }; }
+const Z = sku => ({ mode: 'zero' });
+const OK3 = over => ({ status: 200, body: salesOk(S3PK, 3, win(1, 2, 0.286, 3), win(2, 4, 0.133, 3), win(3, 6, 0.067, 3), over) });
+const OK6 = over => ({ status: 200, body: salesOk(S6PK, 6, win(0, 0, 0, 6), win(1, 1, 0.033, 6), win(2, 2, 0.022, 6), over) });
+const OK12 = over => ({ status: 200, body: salesOk(S12PK, 12, win(0, 0, 0, 12), win(0, 0, 0, 12), win(1, 1, 0.011, 12), over) });
+const EB = skus => skus.map((s, i) => ebL(String(900 + i), s, 3, LEG));
+const allSkus = () => Object.values(salesState().skus || {}).map(e => e.sku);
+const states = () => Object.fromEntries(Object.values(salesState().skus || {}).map(e => [e.sku, e.state]));
+const settled = () => Object.values(salesState().skus || {}).every(e => e.state === 'ok' || e.state === 'error');
+async function coldScan(extraEb, bodies, readyS) {
+  const ready = { t: Infinity };
+  const map = {};
+  Object.keys(bodies).forEach(k => { map[k] = cold(ready, k, bodies[k]); });
+  salesTimes = []; limiterOn();
+  ready.t = Date.now() + SEC(readyS);
+  const t0 = Date.now();
+  await start(map, { eb: EB(extraEb) });
+  await waitFor(settled, SEC(120));
+  await sleep(SEC(15));
+  const rel = salesTimes.map(t => t - t0);
+  const out = { t0, rel, max60: maxInWindow(salesTimes, SEC(60)), hits: lim.hits, total: salesTimes.length };
+  lim = null;                                        // the mock limiter only runs inside budget scans
   return out;
 }
 
-if (process.env.PS22C0A_PERF_ONLY) {
-  (async () => { fs.writeFileSync(process.env.PS22C0A_OUT, JSON.stringify(await perfRun())); process.exit(0); })()
-    .catch(e => { console.error(e); process.exit(2); });
-} else (async () => {
-['psSalesHoldUntilInventory', 'psSalesReleaseAfterInventory', 'psSalesAfterInventory']
+(async () => {
+section('0 — load');
+['psSalesStartRead', 'psSalesWarmSchedule', 'psSalesWarmSettled', 'psSalesWarmCancel', 'psSalesSnapshotReady']
   .forEach(fn => checkTrue(`loaded: ${fn}()`, typeof sandbox[fn] === 'function', typeof sandbox[fn]));
 
-section('1–4 — inventory first; sales wait for the inventory phase to SETTLE');
+section('1–2, 5, 7, 9–11 — 4-SKU LEGO cold (snapshot ready at "50 s"), real B3 timings, mock 30/min limiter');
+B3_TIMINGS();
 {
-  await startLego(); await settleSales();
-  checkTrue('1 first /sb/inventory is sent before the first /ebay/savvy-sales', firstOf('inventory') >= 0 && firstOf('sales') > firstOf('inventory'), JSON.stringify(callLog.map(c => c.kind)));
-  const lastInv = Math.max(...callLog.filter(c => c.kind === 'inventory').map(c => c.n));
-  checkTrue('1b every sales read is sent after the LAST inventory read (inventory phase settled)', callLog.filter(c => c.kind === 'sales').every(c => c.n > lastInv), JSON.stringify(callLog.map(c => c.kind)));
+  const r = await coldScan([S3PK], { [S1]: Z(), [S1PK]: OK1(), [S2PK]: OK2(), [S3PK]: OK3() }, 50);
+  const per = [S1, S1PK, S2PK, S3PK].map(salesOf);
+  console.log('    4-SKU requests: total=' + r.total + ' per SKU ' + JSON.stringify(per) + ' max per "60 s" window=' + r.max60 + ' 429s=' + r.hits);
+  checkTrue('5 4 SKU cold: every exact SKU ends confirmed', [S1, S1PK, S2PK, S3PK].every(s => entry(s).state === 'ok'), JSON.stringify(states()));
+  checkTrue('7 4-SKU request budget ≤ 30 in EVERY sliding "60 s" window, and no 429', r.max60 <= 30 && r.hits === 0, JSON.stringify(r));
+  check('10 final exact-SKU reads: every non-probe SKU read exactly ONCE', per.filter(n => n === 1).length, 3);
+  checkTrue('9 probe warming → confirmed (the one probe carried all the retries)', per.filter(n => n > 1).length === 1 && Math.max(...per) >= 10, JSON.stringify(per));
+  checkTrue('11 exact-SKU results independent (each row shows its OWN numbers)', shows(S1PK, '90d', 273, '136 orders', '3.03') && shows(S2PK, '90d', 38, '9 orders', '0.42') && shows(S3PK, '90d', 6, '3 orders', '0.07') && shows(S1, '90d', 0, '0 orders', '0.00'), slot());
+  check('1 one warming loop per scan (single shared entry) and nothing armed afterwards', [Object.keys(loops()).length, armed()], [1, 0]);
 }
-{
-  const hi = holdInv();
-  const run = startLego({ inv: { [S1]: { defer: hi.defer } } });
-  await ticks(40);
-  checkTrue('2 while inventory is pending: zero sales reads, card shows "Consultando inventario"', countOf('sales') === 0 && invPending() && countOf('inventory') >= 1, JSON.stringify(callLog.map(c => c.kind)));
-  checkTrue('2b location reads NOT blocked by the inventory phase', countOf('location') === 3, JSON.stringify(callLog.map(c => c.kind)));
-  hi.release(S1, LEGO_INV[S1]); await run; await settleSales();
-  check('3 after inventory resolves, one sales read per exact SKU', callLog.filter(c => c.kind === 'sales').map(c => decodeURIComponent(c.u.split('sku=')[1])).sort(), [S1, S1PK, S2PK].sort());
-}
-for (const mode of ['http500', 'network', 'malformed']) {
-  const hi = holdInv();
-  const run = startLego({ inv: { [S1PK]: { defer: hi.defer } } });
-  await ticks(40);
-  const before = countOf('sales');
-  hi.release(S1PK, { mode }); await run; await settleSales();
-  checkTrue('4 inventory failure (' + mode + ') still releases sales; that SKU stays unconfirmed (not 0)', before === 0 && countOf('sales') === 3 && inv(S1PK).state === 'error' && inv(S1PK).available == null, JSON.stringify([before, countOf('sales'), inv(S1PK)]));
-}
-{
-  resetAll(); callLog.length = 0; Object.assign(salesRead, LEGO_SALES());
-  await scan(LEG, 'LEGO', LEGO_SB(), [], { keep: true, noSettle: true, inv: { [S1]: { mode: 'network' }, [S1PK]: { mode: 'network' }, [S2PK]: { mode: 'network' } } });
-  await settleSales();
-  checkTrue('4b ALL inventory reads failing still releases sales', countOf('sales') === 3 && [S1, S1PK, S2PK].every(k => inv(k).state === 'error'), JSON.stringify(callLog.map(c => c.kind)));
-}
-{
-  resetAll(); callLog.length = 0; Object.assign(salesRead, { [S1PK]: { body: LEGO_1PK() } });
-  await scan(LEG, 'LEGO', [], [ebL('336000000001', S1PK, 2, LEG)], { keep: true, noSettle: true });
-  await settleSales();
-  checkTrue('4c Sellbrite has no SKU (no inventory phase) → eBay-only SKU sales still start', countOf('inventory') === 0 && countOf('sales') === 1 && shows(S1PK, '7d', 155, '48 orders', '22.14'), JSON.stringify(callLog.map(c => c.kind)));
-  resetAll(); callLog.length = 0; Object.assign(salesRead, { [S1PK]: { body: LEGO_1PK() } });
-  await scan(LEG, 'LEGO', [], [ebL('336000000001', S1PK, 2, LEG)], { keep: true, noSettle: true, sbFail: true });
-  await settleSales();
-  checkTrue('4d /sb/search error (no inventory phase) → eBay-only SKU sales still start', countOf('sales') === 1, JSON.stringify(callLog.map(c => c.kind)));
-}
-{
-  const hi = holdInv();
-  const run = startLego({ inv: { [S1]: { defer: hi.defer } }, eb: [ebL('336000000009', 'LEG-673419373609-12pk', 1, LEG)] });
-  await ticks(40);
-  checkTrue('4e eBay own-listing SKUs also wait for the inventory phase', countOf('sales') === 0 && countOf('seller-listings') === 1, JSON.stringify(callLog.map(c => c.kind)));
-  hi.release(S1, LEGO_INV[S1]); await run; await settleSales();
-  checkTrue('4f …and start after it (Sellbrite + eBay-only SKU, each once)', countOf('sales') === 4 && callLog.some(c => c.kind === 'sales' && c.u.includes('12pk')), JSON.stringify(callLog.map(c => c.kind)));
+{ // 2: during warming, 4 warming rows but ONE armed timer
+  const ready = { t: Infinity };
+  await start({ [S1]: cold(ready, S1, Z()), [S1PK]: cold(ready, S1PK, OK1()), [S2PK]: cold(ready, S2PK, OK2()), [S3PK]: cold(ready, S3PK, OK3()) }, { eb: EB([S3PK]) });
+  await sleep(SEC(8));
+  const warmingRows = Object.values(salesState().skus).filter(e => e.state === 'warming').length;
+  checkTrue('2 no per-SKU warming timers: 4 warming rows, ONE armed timer, ONE loop entry', warmingRows === 4 && armed() === 1 && Object.keys(loops()).length === 1, JSON.stringify({ warmingRows, armed: armed(), loops: Object.keys(loops()) }));
+  checkTrue('25 unresolved rows never show zero while warming', !/ps-ss-n">0</.test(slot()) && (slot().match(/Preparando ventas reales/g) || []).length === 4, slot().slice(0, 200));
+  const before = salesCalls.length;
+  sandbox.psRequestSavvySales(LEG, [S1, S1PK, S2PK, S3PK]);          // loader called again for the same scan
+  await sleep(SEC(4));
+  checkTrue('24 duplicate loader call for the same scan creates no second loop / timer / extra reads', Object.keys(loops()).length === 1 && armed() <= 1 && salesCalls.length - before <= 2, JSON.stringify({ loops: Object.keys(loops()), d: salesCalls.length - before }));
+  ready.t = 0; await waitFor(settled, SEC(30));
 }
 
-section('5–12 — payloads, SKU set, dedupe, inventory semantics unchanged');
-await startLego(); await settleSales();
-checkTrue('5 inventory request unchanged: GET /sb/inventory?sku=<exact>, Bearer, no body', readCalls.length === 3 && readCalls.every(c => c.method === 'GET' && c.auth === 'Bearer fake-token' && /\/sb\/inventory\?sku=[^&]+$/.test(c.u)), JSON.stringify(readCalls));
-checkTrue('6 sales request unchanged: GET /ebay/savvy-sales?sku=<exact>, Bearer, no body', salesCalls.length === 3 && salesCalls.every(c => c.method === 'GET' && c.auth === 'Bearer fake-token' && !c.body && /\/ebay\/savvy-sales\?sku=[^&]+$/.test(c.u)), JSON.stringify(salesCalls));
-check('7 exact SKU set unchanged (inventory == sales == Sellbrite SKUs)', [readCalls.map(c => c.sku).sort(), salesCalls.map(c => c.sku).sort()], [[S1, S1PK, S2PK].sort(), [S1, S1PK, S2PK].sort()]);
-await scanWith(LEG, 'LEGO', [sbProd(S1PK, 3), sbProd('leg-673419373609-1PK ', 3)], [ebL('336000000001', S1PK, 2, LEG)], {}, { inv: LEGO_INV });
-check('8 sales dedupe unchanged (case/space + Sellbrite/eBay → one request)', salesCalls.map(c => c.sku), [S1PK]);
-await startLego(); await settleSales();
-check('9 inventory exact-SKU isolation (-1 / -1pk / -2pk distinct)', [inv(S1).available, inv(S1PK).available, inv(S2PK).available], [0, 431, 77]);
-checkTrue('10 confirmed zero stays a real 0 (state ok, available 0)', inv(S1).state === 'ok' && inv(S1).available === 0, JSON.stringify(inv(S1)));
+section('6, 8 — 6-SKU cold, same conditions');
 {
-  resetAll(); Object.assign(salesRead, LEGO_SALES());
-  await scan(LEG, 'LEGO', LEGO_SB(), [], { keep: true, noSettle: true, inv: Object.assign({}, LEGO_INV, { [S2PK]: { mode: 'http500' } }) });
-  await settleSales();
-  checkTrue('11 unknown inventory stays unknown (never 0)', inv(S2PK).state === 'error' && inv(S2PK).available == null, JSON.stringify(inv(S2PK)));
-}
-await startLego(); await settleSales();
-checkTrue('12 authoritative warehouse from /sb/inventory (not /sb/search)', inv(S1PK).warehouse_uuid === WH && inv(S1PK).warehouse_uuid !== 'wh-1', JSON.stringify(inv(S1PK)));
-checkTrue('12b inventory pipeline code unchanged vs 77d3cab', ['psReadSbInventory', 'psParseSbInventory', 'psApplySbInventory', 'psLoadSbInventory', 'psSbInvFresh', 'psReconcileSbInventory', 'psSbCardInvHtml', 'psRenderSbRecord'].every(sameAsBefore), '');
-checkTrue('12c sales pipeline code unchanged vs 77d3cab', ['psRequestSavvySales', 'psReadSavvySales', 'psParseSavvySales', 'psSalesFresh', 'psSalesReset', 'psSavvySalesHtml', 'psSavvySalesCellHtml', 'psRenderSavvySales', 'psAuthFetch'].every(sameAsBefore), '');
-
-section('13–18 — stale scans');
-{
-  // scan A (LEGO) inventory pending → employee scans B (IRW)
-  const hi = holdInv();
-  const runA = startLego({ inv: { [S1]: { defer: hi.defer } } });
-  await ticks(40);
-  const IRW = '710363598525', SIRW = 'IRW-710363598525-2';
-  invRead[SIRW] = { rows: [{ warehouse_uuid: WH, warehouse_name: '404 E 3rd St', available: 9, on_hand: 9 }] };
-  salesRead[SIRW] = { body: salesOk(SIRW, 2, win(1, 1, 0.143, 2), win(2, 2, 0.067, 2), win(3, 3, 0.033, 2)) };
-  const nBeforeB = callLog.length;
-  setCur(fixture(IRW, 'Irwin Naturals')); sbConfig.products = [sbProd(SIRW, 4)];
-  await Promise.all([sandbox.psCheckSellbrite(IRW, 'Irwin Naturals'), sandbox.psCheckEbaySellerListings(IRW, 'Irwin Naturals', '')]);
-  await settleSales();
-  const afterB = callLog.slice(nBeforeB);
-  checkTrue('15/17 scan changes while A inventory pending → B starts its own inventory', afterB.some(c => c.kind === 'inventory' && c.u.includes(SIRW)), JSON.stringify(afterB.map(c => c.kind + ' ' + c.u.split('sku=')[1])));
-  checkTrue('18 B then starts its own sales (after its inventory)', afterB.some(c => c.kind === 'sales' && c.u.includes(SIRW)) && afterB.findIndex(c => c.kind === 'sales') > afterB.findIndex(c => c.kind === 'inventory'), '');
-  const nBeforeRelease = callLog.length;
-  hi.release(S1, LEGO_INV[S1]); await runA; await settleSales();
-  const afterRelease = callLog.slice(nBeforeRelease);
-  checkTrue('16 A never starts sales after its inventory settles (not current)', !afterRelease.some(c => c.kind === 'sales') && !callLog.some(c => c.kind === 'sales' && c.u.includes(LEG)), JSON.stringify(afterRelease.map(c => c.kind)));
-  checkTrue('13 A\'s late inventory never paints into B', !vm.runInContext('Object.keys(window._psSbInv || {})', sandbox).some(k => k.includes(LEG)) && inv(SIRW).available === 9 && (vm.runInContext('window._psSbState', sandbox).upc === IRW), JSON.stringify(Object.keys(invStates())));
-  checkTrue('13b A\'s remaining SKUs were never read after the switch', !afterRelease.some(c => c.kind === 'inventory'), JSON.stringify(afterRelease.map(c => c.kind)));
-}
-{
-  const hs = hold2();
-  resetAll(); salesRead[S1PK] = { defer: hs.defer };
-  await scan(LEG, 'LEGO', [sbProd(S1PK, 3)], [], { keep: true, noSettle: true, inv: LEGO_INV });
-  await settleSales();
-  const IRW = '710363598525', SIRW = 'IRW-710363598525-2';
-  salesRead[SIRW] = { body: salesOk(SIRW, 2, win(1, 1, 0.143, 2), win(2, 2, 0.067, 2), win(3, 3, 0.033, 2)) };
-  await scan(IRW, 'Irwin Naturals', [sbProd(SIRW, 4)], [], { keep: true, noSettle: true });
-  await settleSales();
-  hs.release(S1PK, { body: LEGO_1PK() }); await settleSales();
-  checkTrue('14 stale sales response ignored (other UPC)', !slot().includes(S1PK) && slot().includes(SIRW) && !slot().includes('155'), slot());
-}
-{
-  resetAll(); Object.assign(salesRead, LEGO_SALES());
-  await scan(LEG, 'LEGO', LEGO_SB(), [], { keep: true, noSettle: true, inv: LEGO_INV });
-  await scan(LEG, 'LEGO', LEGO_SB(), [], { keep: true, noSettle: true, inv: LEGO_INV });
-  await settleSales();
-  check('14b re-scan of the same UPC: one sales read per SKU per scan (3 + 3)', salesCalls.length, 6);
+  const r = await coldScan([S3PK, S6PK, S12PK], { [S1]: Z(), [S1PK]: OK1(), [S2PK]: OK2(), [S3PK]: OK3(), [S6PK]: OK6(), [S12PK]: OK12() }, 50);
+  console.log('    6-SKU requests: total=' + r.total + ' max per "60 s" window=' + r.max60 + ' 429s=' + r.hits);
+  checkTrue('6 6 SKU cold: every exact SKU ends confirmed', allSkus().length === 6 && allSkus().every(s => entry(s).state === 'ok'), JSON.stringify(states()));
+  checkTrue('8 6-SKU request budget ≤ 30 in EVERY sliding "60 s" window, and no 429', r.max60 <= 30 && r.hits === 0, JSON.stringify(r));
+  const late = await coldScan([S3PK, S6PK, S12PK], { [S1]: Z(), [S1PK]: OK1(), [S2PK]: OK2(), [S3PK]: OK3(), [S6PK]: OK6(), [S12PK]: OK12() }, 60);
+  checkTrue('8b 6-SKU budget holds even if the refresh takes "60 s" (≤ 30 per window, no 429)', late.max60 <= 30 && late.hits === 0, JSON.stringify(late));
 }
 
-section('19–25 — Savvy Sales UI and safety unchanged');
-await startLego(); await settleSales();
-checkTrue('19 compact table unchanged (rows, cells, LEGO values)', slot().includes('<table id="ps-savvy-sales-table">') && shows(S1PK, '7d', 155, '48 orders', '22.14') && shows(S2PK, '90d', 38, '9 orders', '0.42') && cell(S2PK, '7d').includes('= 30 physical units'), slot());
-checkTrue('20 refunds unchanged', cell(S1PK, '30d').includes('⚠️ 1 refunded order included') && cell(S1PK, '90d').includes('⚠️ 3 refunded orders included'), block(S1PK));
-checkTrue('21 cancellations unchanged', cell(S1PK, '90d').includes('Excluded: 3 cancelled orders / 5 packs'), block(S1PK));
-checkTrue('22 nested-window note unchanged', slot().includes('7d ⊂ 30d ⊂ 90d are rolling nested windows: do not add them together.'), '');
-checkTrue('23 avg sold price still hidden', !/\$|avg|average|precio|price/i.test(slot()), '');
-{ const n = callLog.length; await new Promise(r => setTimeout(r, 60)); await settleSales(); check('24 no polling (no new requests after settle)', callLog.length, n); }
-checkTrue('25 no writes during a scan (only GETs; no update-inventory / create-product)', callLog.every(c => c.method === 'GET') && countOf('update-inventory') === 0 && ssSaveCalls.length === 0, JSON.stringify(callLog.filter(c => c.method !== 'GET')));
-checkTrue('25b #22C-0A code issues no request itself and has no timers', (() => { const a = appSrc.indexOf('// ━━ #22C-0A'); const b = appSrc.indexOf('async function psReadSavvySales(', a); const blk = a > 0 && b > a ? appSrc.slice(a, b) : 'X'; return !/fetch|psAuthFetch|setTimeout|setInterval|POST|PUT|PATCH|DELETE/.test(blk); })(), '');
-
-section('26–28 — SUMAR / REEMPLAZAR / post-write reconcile unchanged');
-async function click(sku, modo, qty) {
-  const i = idxOf(sku);
-  getEl('ps-pack-sbqty-' + i).value = String(qty);
-  invCalls = []; readCalls = [];
-  await sandbox.psUpdateSellbriteInventory(i, modo, 'pack');
-  return { i, call: invCalls[0], reads: readCalls.map(r => r.sku) };
-}
-await startLego(); await settleSales();
+section('3, 4 — 1 SKU and 2 SKU cold');
 {
-  invConfig.current = 431;
-  let r = await click(S1PK, 'add', 5);
-  check('26 SUMAR body unchanged (exact SKU, confirmed warehouse, mode add)', r.call && r.call.body, { sku: S1PK, warehouse_uuid: WH, quantity: 5, mode: 'add' });
-  check('28 post-write reconcile: one authoritative re-read of that exact SKU', r.reads, [S1PK]);
-  r = await click(S1PK, 'set', 869);
-  check('27 REEMPLAZAR body unchanged (mode set)', r.call && r.call.body, { sku: S1PK, warehouse_uuid: WH, quantity: 869, mode: 'set' });
-  checkTrue('26b write/reconcile code unchanged vs 77d3cab', ['psUpdateSellbriteInventory', 'psReconcileSbInventory', 'psAdjustSbQty', 'psPersistLocation'].every(sameAsBefore), '');
-}
-
-section('29–37 — locks, #21F, Bulk Split, CSV, Return-to-Fix unchanged');
-await startLego(); await settleSales();
-check('29 1pk/2pk still locked', [sandbox.psIsPackLocked(LEG, 1), sandbox.psIsPackLocked(LEG, 2)], [true, true]);
-checkTrue('29b lock code unchanged vs 77d3cab', ['psPackState', 'psIsPackLocked', 'psRefreshPackLocks', 'psAutoExcludeConfirmedPacks', 'psLockedPackCardHtml'].every(sameAsBefore), '');
-checkTrue('30 #21F location UI code unchanged vs 77d3cab', ['psSsLocEditorHtml', 'psSsLocSummaryHtml', 'psRenderSsLoc', 'psCheckShipStationLocation', 'psSaveShipStationLocation', 'psRemoveLocation'].every(sameAsBefore), '');
-checkTrue('31 Bulk Split code unchanged vs 77d3cab', ['computeSplit', 'updateSplitCalc', 'addSplitPacksToCSV', 'renderSplitCalculatorHTML', 'applyVerdict'].every(sameAsBefore), '');
-checkTrue('32 getDemandTier() unchanged', sameAsBefore('getDemandTier'), '');
-checkTrue('33 DEMAND_TIERS unchanged', beforeSrc != null && (appSrc.match(/const DEMAND_TIERS = \{[\s\S]*?\n\};/) || [''])[0] === (beforeSrc.match(/const DEMAND_TIERS = \{[\s\S]*?\n\};/) || ['x'])[0], '');
-checkTrue('34 internal sold.count placeholder unchanged (both paths)', (appSrc.match(/pricing = \{ sold: \{ avg: 0, count: 0 \}/g) || []).length === 2, '');
-{
-  // New product, same inputs as the #21 golden CSV; an existing 4pk SKU makes a real sales read happen.
-  resetAll();
-  const NAT4 = 'NAT-012345678905-4';
-  salesRead[NAT4] = { body: salesOk(NAT4, 4, win(3, 5, 0.714, 4), win(9, 14, 0.467, 4), win(20, 31, 0.344, 4)) };
-  setSplitActive({ 1: true, 2: true, 3: true, 4: false, 5: false, 6: true, 7: false, 8: false, 9: false, 10: false, 11: false, 12: true });
-  setSplitManual({ 1: 5, 2: 3, 3: 2, 6: 1, 12: 1 });
-  const c = { upc: NEWU, brand: 'Nature Made', title: 'Nature Made Vitamin C Gummies 250mg Immune Support 80ct',
-    category: '11776', _description: 'Full description already generated.', _specifics: { Formulation: 'Gummy', 'Item Form': 'Gummy' },
-    _shade: '', _expDate: 'Oct 2033', location: 'A/1', _bundleImg: 'https://cdn.example/g.jpg', ebay: { prices: { low: 9.99, avg: 18.51 } }, _packImages: {} };
-  [1, 2, 3, 6, 12].forEach(p => c._packImages[p] = { front: 'https://cdn.example/p' + p + '.jpg' });
-  setCur(c);
-  sbConfig.products = [sbProd(NAT4, 5)];
-  invRead[NAT4] = { rows: [{ warehouse_uuid: WH, warehouse_name: '404 E 3rd St', available: 5, on_hand: 5 }] };
-  await Promise.all([sandbox.psCheckSellbrite(NEWU, 'Nature Made'), sandbox.psCheckEbaySellerListings(NEWU, 'Nature Made', c.title)]);
-  await settleSales();
-  setBulk([]); await sandbox.addSplitPacksToCSV();
-  const rows = getBulk().map(b => b.sku);
-  const ex = await captureExport();
-  const golden = fs.readFileSync(path.join(__dirname, 'test-fixtures', 'new-product-csv-4e47c34.csv'), 'utf8');
-  check('35 CSV rows unchanged', rows, ['NAT-012345678905-1pk', 'NAT-012345678905-2pk', 'NAT-012345678905-3pk', 'NAT-012345678905-6pk', 'NAT-012345678905-12pk']);
-  checkTrue('36 CSV bytes identical to the #21 golden file (sales read happened: ' + salesCalls.length + ')', ex.csv === golden && salesCalls.length === 1, ex.csv ? 'len ' + ex.csv.length : 'no csv');
+  const ready = { t: Date.now() + SEC(20) };
+  resetAll(); callLog.length = 0; salesRead = {};
+  salesRead['NAT-031604004033-1'] = cold(ready, 'NAT-031604004033-1', { mode: 'zero' });
+  setCur(fixture(NAT, 'Nature Made')); setSplitActive(Object.assign({}, ALL_ON)); setSplitManual({});
+  sbConfig.products = [sbProd('NAT-031604004033-1', 5)]; sbConfig.defer = null; ebConfig.listings = [];
+  await Promise.all([sandbox.psCheckSellbrite(NAT, 'Nature Made'), sandbox.psCheckEbaySellerListings(NAT, 'Nature Made', '')]);
+  await waitFor(settled, SEC(60)); await sleep(SEC(8));
+  const n = salesOf('NAT-031604004033-1');
+  checkTrue('3 1 SKU cold: its SKU is the probe, confirmed stops polling', entry('NAT-031604004033-1').state === 'ok' && n >= 5 && armed() === 0, JSON.stringify({ n, st: entry('NAT-031604004033-1').state }));
 }
 {
-  const sku2 = 'IRW-710363598525-2pk', IRW = '710363598525';
-  const existingRow = { sku: sku2, upc: IRW, packs: 2, title: 'old', price: '1.00', quantity: 1, expDate: 'Oct 2033' };
-  await scan(IRW, 'Irwin Naturals', [sbProd('IRW-710363598525-2', 4)], [], { rtf: { upc: IRW, sku: sku2 }, bulk: [existingRow], active: { 1: false, 2: true, 3: false, 4: false, 5: false, 6: false, 7: false, 8: false, 9: false, 10: false, 11: false, 12: false }, manual: { 2: 3 } });
-  await settleSales();
-  check('37 Return-to-Fix target still editable; split untouched', [sandbox.psLockSessionEditAllowed(IRW, sku2), act()[2], getSplitManual()[2]], [true, true, 3]);
-  checkTrue('37b Return-to-Fix code unchanged vs 77d3cab', ['psReturnAndFixExpDate', 'psCaptureEditorSnapshot'].every(sameAsBefore), '');
+  const r = await coldScan([], { [S1]: Z(), [S1PK]: OK1(), [S2PK]: OK2() }, 50);   // LEGO Sellbrite-only: 3 exact SKUs
+  checkTrue('4 multi-SKU cold (Sellbrite SKUs only): all confirmed, one probe, ≤ 30 per window', allSkus().every(s => entry(s).state === 'ok') && r.max60 <= 30 && r.hits === 0, JSON.stringify(r));
 }
 
-section('38–40 — no timeout / URL / request-count changes');
-const timeoutsOf = src => (src.match(/setTimeout\([^;]*?,\s*\d+\s*\)/g) || []).map(x => x.match(/(\d+)\s*\)$/)[1]).sort().join(',');
-checkTrue('38 every setTimeout delay in app.js unchanged vs 77d3cab', beforeSrc != null && timeoutsOf(appSrc) === timeoutsOf(beforeSrc), '');
-checkTrue('38b /sb/search 10 s abort and seller-listings 15 s abort unchanged', appSrc.includes('setTimeout(function(){ sbCtrl.abort(); }, 10000)') && appSrc.includes('setTimeout(function(){ ctrl.abort(); }, 15000)'), '');
-check('39 SAVVY_API unchanged', (appSrc.match(/^const SAVVY_API = '[^']+';/m) || [''])[0], (beforeSrc || '').match(/^const SAVVY_API = '[^']+';/m) ? beforeSrc.match(/^const SAVVY_API = '[^']+';/m)[0] : 'x');
-checkTrue('39b app.js diff vs 77d3cab touches only the #22C-0A gating', beforeSrc != null && (() => {
-  const a = appSrcG.indexOf('// ━━ #22C-0A'), b = appSrcG.indexOf('async function psReadSavvySales(', a);
-  let x = appSrcG.slice(0, a) + appSrcG.slice(b);
-  x = x.replace("  var salesSt = window._psSales;          // #22C-0A: ventas esperan al inventario\n  psSalesHoldUntilInventory(salesSt);\n", '')
-    .replace("      psSalesReleaseAfterInventory(salesSt);   // #22C-0A: no hay inventario que leer\n", '')
-    .replace("    // #22C-0A: se piden DESPUÉS de que termine la fase de inventario.\n    psSalesAfterInventory(upcClean, sbListings", "    psRequestSavvySales(upcClean, sbListings")
-    .replace("    Promise.resolve(_invLoad).then(function(){ psSalesReleaseAfterInventory(salesSt); },\n                                   function(){ psSalesReleaseAfterInventory(salesSt); });\n", '')
-    .replace("    psSalesReleaseAfterInventory(salesSt);   // #22C-0A: sin fase de inventario\n", '')
-    .replace("  psSalesAfterInventory(upcClean, listings.map(", "  psRequestSavvySales(upcClean, listings.map(");
-  return x === beforeSrc;
-})(), '');
+section('12–14, 27–30 — confirmed zero, stale / fresh (no polling), display semantics');
+FAST();
+{
+  const ready = { t: Date.now() + 60 };
+  await start({ [S1]: cold(ready, S1, Z()), [S1PK]: cold(ready, S1PK, OK1({ snapshot_age_seconds: 1, refreshing: false, stale: false })), [S2PK]: cold(ready, S2PK, Z()) });
+  await waitFor(settled, 3000);
+  checkTrue('12 confirmed zero after warming stays a REAL 0 (its own read)', shows(S2PK, '7d', 0, '0 orders', '0.00') && salesOf(S2PK) === 1, block(S2PK));
+  checkTrue('27 refunds preserved', cell(S1PK, '90d').includes('⚠️ 3 refunded orders included'), cell(S1PK, '90d'));
+  checkTrue('28 cancellations preserved', cell(S1PK, '90d').includes('Excluded: 3 cancelled orders / 5 packs'), cell(S1PK, '90d'));
+  checkTrue('29 freshness preserved', block(S1PK).includes('Datos actualizados hace menos de 1 min'), block(S1PK));
+}
+{
+  await start({ [S1PK]: seq(S1PK, [OK1({ snapshot_age_seconds: 720, refreshing: true, stale: true })]), [S2PK]: seq(S2PK, [OK2({ snapshot_age_seconds: 720, refreshing: true, stale: true })]) });
+  await sleep(200);
+  checkTrue('13 stale confirmed (refreshing:true): numbers shown at once, one read per SKU, no polling', [S1, S1PK, S2PK].every(s => salesOf(s) === 1) && armed() === 0 && block(S2PK).includes('Datos de hace 12 min · actualizando…') && shows(S2PK, '90d', 38, '9 orders', '0.42'), JSON.stringify([S1, S1PK, S2PK].map(salesOf)));
+  checkTrue('30 physical units preserved', cell(S2PK, '90d').includes('= 76 physical units'), cell(S2PK, '90d'));
+  await start({ [S1PK]: seq(S1PK, [OK1({ snapshot_age_seconds: 30, refreshing: false, stale: false })]), [S2PK]: seq(S2PK, [OK2()]) });
+  await sleep(200);
+  checkTrue('14 fresh confirmed: one read per exact SKU, no loop timer', [S1, S1PK, S2PK].every(s => salesOf(s) === 1) && armed() === 0, JSON.stringify([S1, S1PK, S2PK].map(salesOf)));
+}
 
-section('PERFORMANCE — capacity-2 backend, cold sales ' + SALES_MS + ' ms, other requests ' + FAST_MS + ' ms');
-const after = await perfRun();
-let before = null, childErr = '';
-try {
-  const tmp = path.join(require('os').tmpdir(), 'ps22c0a-before-' + process.pid + '.js');
-  const outF = path.join(require('os').tmpdir(), 'ps22c0a-before-' + process.pid + '.json');
-  fs.writeFileSync(tmp, beforeSrc || '');
-  require('child_process').execFileSync(process.execPath, [__filename], { env: Object.assign({}, process.env, { PS22C0A_PERF_ONLY: '1', PS22C0A_APP: tmp, PS22C0A_OUT: outF }), stdio: 'ignore', cwd: __dirname });
-  before = JSON.parse(fs.readFileSync(outF, 'utf8')); fs.unlinkSync(tmp); fs.unlinkSync(outF);
-} catch (e) { childErr = String(e && e.message || e).slice(0, 200); }
-console.log('  BEFORE (77d3cab): ' + JSON.stringify(before));
-console.log('  AFTER  (#22C-0A): ' + JSON.stringify(after));
-checkTrue('P1 before-run obtained from unmodified 77d3cab', !!before, childErr);
-checkTrue('P2 BEFORE: inventory waits behind the slow sales work (≥ ' + SALES_MS + ' ms)', !!before && before.inventoryConfirmedMs >= SALES_MS, JSON.stringify(before));
-checkTrue('P3 AFTER: inventory confirmed well before the slow sales work (< ' + SALES_MS / 2 + ' ms)', after.inventoryConfirmedMs != null && after.inventoryConfirmedMs < SALES_MS / 2 && after.invOk, JSON.stringify(after));
-checkTrue('P4 AFTER: request order is all inventory, then all sales', after.order === 'iiisss', after.order);
-checkTrue('P5 AFTER: sales still complete (not blocked forever)', after.allDoneMs < 10000 && after.order.includes('s'), JSON.stringify(after));
-check('40 no request-count increase (same counts per endpoint BEFORE vs AFTER)', after.counts, before ? before.counts : null);
+section('15–19, 26 — probe failures');
+{
+  limiterOn(); lim.max = 3;                         // tiny budget: the probe's 4th call gets 429
+  const ready = { t: Infinity };
+  await start({ [S1]: cold(ready, S1, Z()), [S1PK]: cold(ready, S1PK, OK1()), [S2PK]: cold(ready, S2PK, OK2()) });
+  await waitFor(settled, 3000); await sleep(200);
+  const n = salesCalls.length;
+  await sleep(300);
+  checkTrue('15 probe 429 stops the loop: unresolved rows "Ventas no confirmadas (http_429)", no retry storm', Object.values(salesState().skus).every(e => e.state === 'error' && e.reason === 'http_429') && salesCalls.length === n && n === 4 && armed() === 0, JSON.stringify({ n, s: states() }));
+  checkTrue('25b failed rows never show zero', !/ps-ss-n">0</.test(slot()) && (slot().match(/Ventas no confirmadas <span class="ps-ss-sub">\(http_429\)/g) || []).length === 3, slot().slice(0, 200));
+  lim = null;
+}
+for (const [id, name, spec] of [['16', 'HTTP 500', { status: 500, body: { status: 'unconfirmed', complete: false, reason: 'ebay_http_500', windows: null } }],
+                                  ['17', 'malformed response', { mode: 'malformed' }], ['18', 'network error', { mode: 'network' }]]) {
+  let first = true;
+  await start({ [S1PK]: { defer: async () => { const r = salesBuild(S1PK, first ? W(S1PK) : spec); first = false; return r; } },
+                [S1]: seq(S1, [Z()]), [S2PK]: seq(S2PK, [OK2()]) });
+  await waitFor(settled, 3000); await sleep(200);
+  const n = salesCalls.length; await sleep(200);
+  checkTrue(`${id} probe ${name} stops the loop; the row is "no confirmadas", others read once (existing fail-safe), no retries`, entry(S1PK).state === 'error' && salesOf(S1PK) === 2 && salesOf(S1) === 1 && salesOf(S2PK) === 1 && salesCalls.length === n && armed() === 0 && !/ps-ss-n">0<\/span> packs<div class="ps-ss-sub">0 orders · 0.00 packs\/day<\/div><\/td><td data-label="30D" class="ps-ss-cell"><span class="ps-ss-n">0/.test(block(S1PK)), JSON.stringify({ s: states(), n: [S1, S1PK, S2PK].map(salesOf) }));
+}
+{
+  const before = expired.n;
+  await start({ [S1PK]: seq(S1PK, [{ mode: 'http401' }]), [S1]: seq(S1, [Z()]), [S2PK]: seq(S2PK, [OK2()]) });
+  await waitFor(settled, 3000);
+  checkTrue('19 401 on the gate → existing session-expired behaviour (savvySesionCaducada, "sesion_expirada"), no polling', entry(S1PK).state === 'error' && entry(S1PK).reason === 'sesion_expirada' && expired.n > before && armed() === 0, JSON.stringify({ r: entry(S1PK).reason, e: expired.n - before }));
+}
+{
+  // gate confirmed first, then a later final read comes back warming and its probe hits 429
+  limiterOn(); lim.max = 4;
+  await start({ [S1PK]: seq(S1PK, [OK1()]), [S1]: seq(S1, [W(S1)]), [S2PK]: seq(S2PK, [W(S2PK)]) });
+  await waitFor(settled, 3000); await sleep(150);
+  checkTrue('26 already-confirmed rows are not erased by a later failure', entry(S1PK).state === 'ok' && shows(S1PK, '90d', 273, '136 orders', '3.03') && Object.values(salesState().skus).some(e => e.state === 'error'), JSON.stringify(states()));
+  lim = null;
+}
 
-section('NEGATIVE-CONTROL NOTE');
-console.log('  Against 77d3cab app.js the ordering / gating / performance checks fail (sales are sent before inventory).');
+section('20–23 — stale scan safety');
+{
+  setWarm(40, 40, 30, 5000);
+  const ready = { t: Infinity };
+  await start({ [S1]: cold(ready, S1, Z()), [S1PK]: cold(ready, S1PK, OK1()), [S2PK]: cold(ready, S2PK, OK2()) });
+  const oldSt = salesState(), oldW = oldSt.warm;
+  resetAll(); setCur(fixture(NEWU, 'Other')); sbConfig.products = [];
+  await Promise.all([sandbox.psCheckSellbrite(NEWU, 'Other'), sandbox.psCheckEbaySellerListings(NEWU, 'Other', '')]);
+  await sleep(250);
+  checkTrue('20 new scan cancels the old shared timer', !!oldW && !oldW.timer && oldW.phase === 'failed' && oldW.failReason === 'scan_replaced', JSON.stringify(oldW && { p: oldW.phase, t: !!oldW.timer }));
+  check('21 late probe ignored: no request for the old scan after the new one', salesCalls.length, 0);
+  checkTrue('21b nothing from the old product paints into the new one', !slot().includes(S1PK) && !slot().includes('Preparando'), slot());
+}
+{
+  // late FINAL read: gate confirms, a final read is still in flight when the same UPC is scanned again
+  FAST();
+  let relS2; const lateS2 = new Promise(r => { relS2 = r; });
+  await start({ [S1PK]: seq(S1PK, [OK1()]), [S1]: seq(S1, [Z()]), [S2PK]: { defer: () => lateS2 } });
+  const g1 = salesState();
+  await start({ [S1PK]: seq(S1PK, [OK1({ snapshot_age_seconds: 5, refreshing: false, stale: false })]), [S1]: seq(S1, [Z()]), [S2PK]: seq(S2PK, [Z()]) });
+  const g2 = salesState();
+  await waitFor(settled, 2000);
+  relS2(salesBuild(S2PK, OK2()));
+  await sleep(150);
+  checkTrue('22 late final read from the previous scan is ignored (the new scan keeps its own confirmed zero)', shows(S2PK, '90d', 0, '0 orders', '0.00') && entry(S2PK).state === 'ok', block(S2PK));
+  checkTrue('23 same UPC rescanned = new scan generation (new state object, new shared probe state)', g1 !== g2 && g1.warm !== g2.warm && g2.upc === g1.upc, '');
+}
 
 section('SUMMARY');
 console.log(`\n${passed} passed, ${failed} failed`);

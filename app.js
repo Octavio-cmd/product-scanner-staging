@@ -7501,7 +7501,7 @@ function psRequestSavvySales(upcClean, skus){
     st.skus[k] = { sku: s, pack: psParseSellbritePack(s, upcClean), state: 'loading' };
     st.order.push(k);
     added = true;
-    psReadSavvySales(st, k);
+    psSalesStartRead(st, k);   // #22C-0C: una sola puerta/sondeo compartido por escaneo
   });
   if (added) psRenderSavvySales();
 }
@@ -7538,11 +7538,13 @@ async function psReadSavvySales(st, k){
       : ((err && err.code) || 'network_error') };
   }
   if (!psSalesFresh(st) || st.skus[k] !== e) return;
-  // #22C-0B3: "warming" reintenta solo (acotado); agotado el límite → no confirmadas.
+  // #22C-0B3 / #22C-0C: "warming" espera a UN sondeo compartido por escaneo
+  // (acotado); agotado el límite → no confirmadas.
   if (result.state === 'warming' && !psSalesWarmSchedule(st, k, result.retryAfter)) {
-    result = { state: 'error', reason: 'sales_snapshot_warming_timeout' };
+    result = { state: 'error', reason: (st.warm && st.warm.failReason) || 'sales_snapshot_warming_timeout' };
   }
   st.skus[k] = Object.assign({ sku: e.sku, pack: e.pack }, result);
+  psSalesWarmSettled(st, k, result);   // #22C-0C: libera o cierra los SKUs en espera
   psRenderSavvySales();
 }
 
@@ -13005,35 +13007,117 @@ function psSalesFreshnessText(f){
   return f.refreshing ? 'Datos de hace ' + edad + ' · actualizando…' : 'Datos actualizados hace ' + edad;
 }
 
-// true si quedó (o ya estaba) un reintento programado para este SKU.
+// ━━ #22C-0C: UN SOLO SONDEO "WARMING" POR ESCANEO ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Todos los SKUs exactos esperan la MISMA foto compartida del backend (#22C-0B2)
+// y /ebay/savvy-sales cuenta 30 peticiones/min por usuario — cada lectura y cada
+// reintento gasta una. #22C-0B3 reintentaba POR SKU (4 SKUs ≈ 84 pet./min →
+// http_429 a los ~20 s). Ahora, por escaneo (st.warm):
+//  - El PRIMER SKU exacto se lee solo (la "puerta"); los demás esperan SIN
+//    petición ("⏳ Consultando…").
+//  - Puerta confirmada (fresca o vieja-actualizando) → cada SKU restante se lee
+//    UNA vez. Sin sondeo.
+//  - Puerta "warming" → es el ÚNICO sondeo: 2 s, luego cada 3 s, ≤30 reintentos
+//    y ≤90 s (mismas constantes #22C-0B3). Las filas en espera muestran
+//    "⏳ Preparando ventas reales…". Al confirmarse, cada SKU restante se lee
+//    UNA vez y se pinta con SUS números (el sondeo nunca da números a otro SKU).
+//  - Puerta/sondeo con http_429 o límite agotado → se detiene; las filas sin
+//    resolver muestran "⚠️ Ventas no confirmadas (motivo)" sin más peticiones.
+//    Con otro error (red, 500, 401, respuesta inválida) se conserva lo de
+//    siempre: cada SKU restante se lee UNA vez, sin reintentos. Una fila ya
+//    confirmada nunca se borra.
+//  - Un escaneo nuevo (aunque sea el mismo UPC) cancela el temporizador; las
+//    respuestas tardías no pintan nada (psSalesFresh).
+// Límite conocido: dos pestañas frías del mismo usuario comparten los 30/min
+// del backend; aquí no se coordinan pestañas.
+function psSalesSnapshotReady(result){
+  return !!result && (result.state === 'ok' || result.reason === 'unclassifiable_line_items');
+}
+
+function psSalesWarmIndex(st, W){
+  st.warmLoops = {};
+  st.warmLoops[W.gate] = W;   // una sola entrada: el sondeo compartido
+}
+
+function psSalesStartRead(st, k){
+  var W = st.warm;
+  if (!W) {
+    W = st.warm = { gate: k, phase: 'gate', waiting: {}, tries: 0, started: 0, timer: null, done: false, failReason: '' };
+    psSalesWarmIndex(st, W);
+    psReadSavvySales(st, k);
+    return;
+  }
+  if (W.phase === 'ready') { psReadSavvySales(st, k); return; }
+  if (W.phase === 'failed') {
+    var e = st.skus[k];
+    st.skus[k] = { sku: e.sku, pack: e.pack, state: 'error', reason: W.failReason || 'error' };
+    return;
+  }
+  W.waiting[k] = true;                                    // espera sin petición
+  if (W.phase === 'warming') st.skus[k].state = 'warming';
+}
+
+// true si quedó (o ya estaba) el reintento del sondeo compartido.
 function psSalesWarmSchedule(st, k, retryAfterSec){
   if (!st || !psSalesFresh(st)) return false;
-  var loops = st.warmLoops || (st.warmLoops = {});
-  var L = loops[k] || (loops[k] = { tries: 0, started: Date.now(), timer: null, done: false });
-  if (L.timer) return true;
-  var delay = L.tries === 0 ? PS_SALES_WARM_FIRST_MS : PS_SALES_WARM_EVERY_MS;
+  var W = st.warm;
+  if (!W || W.phase === 'failed') return false;
+  if (W.gate !== k) {
+    if (W.phase === 'ready') {            // una lectura final volvió "warming": pasa a ser el sondeo (mismo presupuesto)
+      W.gate = k; W.done = false; psSalesWarmIndex(st, W);
+    } else { W.waiting[k] = true; return true; }
+  }
+  if (W.phase !== 'warming') { W.phase = 'warming'; if (!W.started) W.started = Date.now(); }
+  Object.keys(W.waiting).forEach(function(w){ var x = st.skus[w]; if (x && x.state === 'loading') x.state = 'warming'; });
+  if (W.timer) return true;
+  var delay = W.tries === 0 ? PS_SALES_WARM_FIRST_MS : PS_SALES_WARM_EVERY_MS;
   var ra = Number(retryAfterSec);
   if (isFinite(ra) && ra > 0) delay = Math.max(delay, Math.min(ra * 1000, PS_SALES_WARM_RETRY_AFTER_MAX_MS));
-  if (L.done || L.tries >= PS_SALES_WARM_MAX_TRIES || Date.now() - L.started + delay > PS_SALES_WARM_MAX_MS) {
-    L.done = true;
+  if (W.done || W.tries >= PS_SALES_WARM_MAX_TRIES || Date.now() - W.started + delay > PS_SALES_WARM_MAX_MS) {
+    W.done = true;
     return false;
   }
-  L.tries++;
-  L.timer = setTimeout(function(){
-    L.timer = null;
-    if (L.done || !psSalesFresh(st) || !st.warmLoops || st.warmLoops[k] !== L) return;
-    var e = st.skus[k];
-    if (e && e.state === 'warming') psReadSavvySales(st, k);
+  W.tries++;
+  W.timer = setTimeout(function(){
+    W.timer = null;
+    if (W.done || !psSalesFresh(st) || st.warm !== W || W.phase !== 'warming') return;
+    var e = st.skus[W.gate];
+    if (e && e.state === 'warming') psReadSavvySales(st, W.gate);
   }, delay);
   return true;
 }
 
+// Después de pintar el resultado de k: si k es la puerta/sondeo, libera (foto
+// lista) o cierra (cualquier otro resultado) los SKUs en espera.
+function psSalesWarmSettled(st, k, result){
+  var W = st && st.warm;
+  if (!W || W.gate !== k || result.state === 'warming') return;
+  if (W.timer) { clearTimeout(W.timer); W.timer = null; }
+  W.done = true;
+  var waiting = Object.keys(W.waiting);
+  W.waiting = {};
+  var reason = String(result.reason || '');
+  if (psSalesSnapshotReady(result) || (reason !== 'http_429' && reason !== 'sales_snapshot_warming_timeout')) {
+    // Foto lista → cada SKU restante se lee UNA vez. Un error genérico de la
+    // puerta (red, 500, 401, respuesta inválida) conserva el comportamiento de
+    // siempre: cada SKU exacto se lee una vez y muestra SU resultado (sin reintentos).
+    W.phase = 'ready';
+    waiting.forEach(function(w){ var x = st.skus[w]; if (x && (x.state === 'loading' || x.state === 'warming')) psReadSavvySales(st, w); });
+  } else {
+    W.phase = 'failed';
+    W.failReason = String(result.reason || 'error');
+    waiting.forEach(function(w){
+      var x = st.skus[w];
+      if (x && (x.state === 'loading' || x.state === 'warming')) st.skus[w] = { sku: x.sku, pack: x.pack, state: 'error', reason: W.failReason };
+    });
+  }
+}
+
 function psSalesWarmCancel(st){
-  if (!st || !st.warmLoops) return;
-  Object.keys(st.warmLoops).forEach(function(k){
-    var L = st.warmLoops[k];
-    if (L.timer) clearTimeout(L.timer);
-    L.timer = null;
-    L.done = true;
-  });
+  var W = st && st.warm;
+  if (!W) return;
+  if (W.timer) clearTimeout(W.timer);
+  W.timer = null;
+  W.done = true;
+  W.phase = 'failed';
+  W.failReason = 'scan_replaced';
 }

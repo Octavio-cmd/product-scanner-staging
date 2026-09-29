@@ -207,9 +207,11 @@ const fixesSrc = fs.readFileSync(path.join(__dirname, 'multipack-fixes.js'), 'ut
 const appSrc = fs.readFileSync(process.env.PS22BC_APP || path.join(__dirname, 'app.js'), 'utf8');
 // #22C-0B3 (warming auto-retry + age note) is separately scoped: guards compare
 // app.js with exactly those edits reverted.
-// Production-compatibility hardening (Clothing Sheets URL, rembg warm-up, staging
-// badge removed) is separately scoped as well: revert exactly those edits first.
-const appSrcP = require('./scope-production-compat.js').undoProdCompat(appSrc);
+// #22C-0C (one shared warming probe per scan) and the Production-compatibility
+// hardening (Clothing Sheets URL, rembg warm-up, staging badge removed) are
+// separately scoped: revert exactly those edits first, then #22C-0B3.
+const appSrcC = require('./scope-22c-0c.js').undo22c0c(appSrc);
+const appSrcP = require('./scope-production-compat.js').undoProdCompat(appSrcC);
 const appSrcG = require('./scope-22c-0b3.js').undo22c0b3(appSrcP);
 let loadError = null;
 try { vm.runInContext(fixesSrc, sandbox, { filename: 'multipack-fixes.js' }); } catch (e) { loadError = 'fixes: ' + e.message; }

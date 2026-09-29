@@ -210,9 +210,11 @@ const fixesSrc = fs.readFileSync(path.join(__dirname, 'multipack-fixes.js'), 'ut
 const appSrc = fs.readFileSync(process.env.PS22C0B3_APP || path.join(__dirname, 'app.js'), 'utf8');
 // #22C-0B3 (warming auto-retry + age note) is separately scoped: guards compare
 // app.js with exactly those edits reverted.
-// Production-compatibility hardening (Clothing Sheets URL, rembg warm-up, staging
-// badge removed) is separately scoped as well: revert exactly those edits first.
-const appSrcP = require('./scope-production-compat.js').undoProdCompat(appSrc);
+// #22C-0C (one shared warming probe per scan) and the Production-compatibility
+// hardening (Clothing Sheets URL, rembg warm-up, staging badge removed) are
+// separately scoped: revert exactly those edits first, then #22C-0B3.
+const appSrcC = require('./scope-22c-0c.js').undo22c0c(appSrc);
+const appSrcP = require('./scope-production-compat.js').undoProdCompat(appSrcC);
 const appSrcG = require('./scope-22c-0b3.js').undo22c0b3(appSrcP);
 let loadError = null;
 try { vm.runInContext(fixesSrc, sandbox, { filename: 'multipack-fixes.js' }); } catch (e) { loadError = 'fixes: ' + e.message; }
@@ -505,7 +507,7 @@ FAST();
 section('1–2 — backward compatibility with the current backend (no B2 metadata)');
 await start({ [S1PK]: { body: LEGO_1PK() }, [S2PK]: { body: LEGO_2PK() } });
 checkTrue('1 old-backend confirmed response renders the #22B table', shows(S1PK, '90d', 273, '136 orders', '3.03') && shows(S2PK, '7d', 15, '5 orders', '2.14'), block(S1PK));
-checkTrue('2 metadata absent: no age note, no freshness field, no retry loop', !slot().includes('ps-ss-age') && !('freshness' in entry(S1PK)) && Object.keys(loops()).length === 0, JSON.stringify(entry(S1PK)));
+checkTrue('2 metadata absent: no age note, no freshness field, no retry loop', !slot().includes('ps-ss-age') && !('freshness' in entry(S1PK)) && armed() === 0 && !Object.values(loops()).some(L => L.phase === 'warming'), JSON.stringify(entry(S1PK)));
 check('2b one sales request per exact SKU (as #22B)', [salesOf(S1PK), salesOf(S2PK)], [1, 1]);
 
 section('3–11 — warming → automatic retry → confirmed');
@@ -515,13 +517,14 @@ check('3 warming recognised', entry(S1PK).state, 'warming');
 checkTrue('4 warming shows no fake zero', !/ps-ss-n">0</.test(block(S1PK)) && !block(S1PK).includes(' packs'), block(S1PK));
 checkTrue('5 warming shows the preparing text, not "Ventas no confirmadas"', block(S1PK).includes('⏳ Preparando ventas reales…') && block(S1PK).includes('Actualizando automáticamente.') && !block(S1PK).includes('Ventas no confirmadas'), block(S1PK));
 checkTrue('6 auto-retry scheduled (one armed timer for that SKU)', armed() === 1 && !!loops()[sandbox.psSbInvKey(S1PK)], JSON.stringify(Object.keys(loops())));
-checkTrue('27b the other SKU (confirmed) is not waiting', entry(S2PK).state === 'ok' && !loops()[sandbox.psSbInvKey(S2PK)], '');
+// #22C-0C: the other exact SKU waits for the ONE shared probe (no own timer, no own request).
+checkTrue('27b the other SKU waits for the shared probe (no own timer, no request yet)', entry(S2PK).state === 'warming' && !loops()[sandbox.psSbInvKey(S2PK)] && salesOf(S2PK) === 0, JSON.stringify({ st: entry(S2PK).state, n: salesOf(S2PK) }));
 await waitFor(() => entry(S1PK).state === 'ok', 3000);
 checkTrue('11 employee did not rescan: the table filled automatically', entry(S1PK).state === 'ok' && shows(S1PK, '90d', 273, '136 orders', '3.03'), block(S1PK));
 check('10 confirmed stops polling: exactly 1 + 3 requests', salesOf(S1PK), 4);
 await sleep(150);
 check('29 no polling after confirmed', [salesOf(S1PK), armed()], [4, 0]);
-check('9 one retry loop per exact SKU (2 SKUs → only the warming one)', Object.keys(loops()), [sandbox.psSbInvKey(S1PK)]);
+check('9 #22C-0C one shared loop per scan; the other SKU is read ONCE after the probe confirms, with its own numbers', [Object.keys(loops()), salesOf(S2PK), shows(S2PK, '90d', 38, '9 orders', '0.42')], [[sandbox.psSbInvKey(S1PK)], 1, true]);
 
 section('7–8, 48 — never resolves: bounded, then unconfirmed');
 setWarm(10, 15, 6, 90000);
@@ -537,7 +540,7 @@ await waitFor(() => entry(S1PK).state === 'error', 3000);
 const byTime = salesOf(S1PK);
 checkTrue('7c retry bounded by elapsed time too (200 ms budget, 40 ms steps → ≤ 7 requests)', byTime >= 3 && byTime <= 7, byTime);
 await sleep(200);
-checkTrue('48 request count bounded (≤ 1 + MAX_TRIES per SKU; nothing after the limit)', salesOf(S1PK) === byTime && salesOf(S2PK) === 1, salesOf(S1PK));
+checkTrue('48 request count bounded (probe ≤ 1 + MAX_TRIES; the waiting SKU is never read; nothing after the limit)', salesOf(S1PK) === byTime && salesOf(S2PK) === 0 && block(S2PK).includes('sales_snapshot_warming_timeout'), salesOf(S1PK) + '/' + salesOf(S2PK));
 
 section('12–17 — freshness note');
 FAST();
@@ -583,13 +586,13 @@ section('22–25 — a new scan cancels / ignores the old retry');
 setWarm(60, 60, 30, 90000);
 await start({ [S1PK]: seq(S1PK, [W(S1PK)]), [S2PK]: seq(S2PK, [W(S2PK)]) });
 const oldSt = salesState();
-checkTrue('27 multiple SKUs warm independently (2 loops, 2 armed timers)', Object.keys(loops()).length === 2 && armed() === 2, JSON.stringify(Object.keys(loops())));
+checkTrue('27 #22C-0C multiple warming SKUs share ONE loop / ONE armed timer', Object.keys(loops()).length === 1 && armed() === 1, JSON.stringify(Object.keys(loops())));
 // employee scans another product (no Sellbrite SKUs) while LEGO is warming
 resetAll();
 setCur(fixture('012345678905', 'Other')); sbConfig.products = [];
 await Promise.all([sandbox.psCheckSellbrite('012345678905', 'Other'), sandbox.psCheckEbaySellerListings('012345678905', 'Other', '')]);
 await settleSales();
-checkTrue('22 scan change cancels the old retry timers', !!oldSt.warmLoops && Object.keys(oldSt.warmLoops).length === 2 && Object.values(oldSt.warmLoops).every(L => !L.timer && L.done), JSON.stringify(oldSt.warmLoops));
+checkTrue('22 scan change cancels the old retry timers', !!oldSt.warmLoops && Object.keys(oldSt.warmLoops).length === 1 && Object.values(oldSt.warmLoops).every(L => !L.timer && L.done), JSON.stringify(oldSt.warmLoops));
 await sleep(250);
 check('23 old retry never requests after the new scan (log reset at the new scan; new product has no SKU)', salesCalls.length, 0);
 checkTrue('24 old response never paints into the new scan', !slot().includes(S1PK) && !slot().includes('Preparando'), slot());
@@ -602,7 +605,7 @@ await start({ [S1PK]: seq(S1PK, [OK1({ snapshot_age_seconds: 5, refreshing: fals
 const callsNow = salesOf(S1PK);
 rel(salesBuild(S1PK, W(S1PK)));
 await sleep(200);
-checkTrue('25 same UPC, newer scan: the old scan\'s late warming answer starts no loop and paints nothing', !(staleSt.warmLoops && Object.keys(staleSt.warmLoops).length) && entry(S1PK).state === 'ok' && salesOf(S1PK) === callsNow && shows(S1PK, '90d', 273, '136 orders', '3.03'), JSON.stringify({ l: staleSt.warmLoops, n: salesOf(S1PK), c: callsNow }));
+checkTrue('25 same UPC, newer scan: the old scan\'s late warming answer starts no loop and paints nothing', !!staleSt.warm && staleSt.warm.phase === 'failed' && !staleSt.warm.timer && staleSt.warm.tries === 0 && entry(S1PK).state === 'ok' && salesOf(S1PK) === callsNow && shows(S1PK, '90d', 273, '136 orders', '3.03'), JSON.stringify({ l: staleSt.warmLoops, n: salesOf(S1PK), c: callsNow }));
 
 section('26, 28 — exact SKU isolation; no duplicate timers');
 FAST();
@@ -686,9 +689,9 @@ setWarm(5, 8, 30, 90000);
 await start({ [S1PK]: seq(S1PK, [W(S1PK)]), [S2PK]: seq(S2PK, [W(S2PK)]) });
 await waitFor(() => entry(S1PK).state === 'error' && entry(S2PK).state === 'error', 5000);
 await sleep(150);
-check('S4 never resolves: polling stops at the limit (1 + 30 per SKU)', [salesOf(S1PK), salesOf(S2PK)], [31, 31]);
+check('S4 never resolves: the one shared probe stops at the limit (1 + 30); the waiting SKU is never polled', [salesOf(S1PK), salesOf(S2PK)], [31, 0]);
 checkTrue('S5 never resolves: "⚠️ Ventas no confirmadas" shown, no timer left', block(S1PK).includes('⚠️ Ventas no confirmadas') && block(S2PK).includes('⚠️ Ventas no confirmadas') && armed() === 0, slot());
-console.log('  simulated: warming×5 → confirmed = ' + 6 + ' requests (1pk), warming×3 → confirmed = 4 (2pk); never-resolves = 31 per SKU, then stop.');
+console.log('  simulated: warming×5 → confirmed = ' + 6 + ' requests (1pk), warming×3 → confirmed = 4 (2pk); never-resolves = 31 for the one probe, 0 for the waiting SKU, then stop (#22C-0C).');
 
 section('SUMMARY');
 console.log(`\n${passed} passed, ${failed} failed`);
