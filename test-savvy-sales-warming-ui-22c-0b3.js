@@ -434,8 +434,13 @@ async function startLego(extra) {
 // ── #22C-0B3 helpers ──────────────────────────────────────────────────────
 const cp = require('child_process');
 const BASE_SHA = '574a351333432bf40b4a2e405f20f18e24ac81fd';
+// Employee STAGING (separate history): c8579aa is the staging #22C-0A commit
+// whose app.js is byte-identical to Test Preview 574a351 — use whichever exists.
+const BASE_SHAS = [BASE_SHA, 'c8579aa40aff4011e3b661713cad7f0212c37227'];
 let base574 = null;
-try { base574 = cp.execSync('git show ' + BASE_SHA + ':app.js', { cwd: __dirname, encoding: 'utf8', maxBuffer: 64 << 20, stdio: ['ignore', 'pipe', 'ignore'] }); } catch (e) { base574 = null; }
+for (const sha of BASE_SHAS) {
+  try { base574 = cp.execSync('git show ' + sha + ':app.js', { cwd: __dirname, encoding: 'utf8', maxBuffer: 64 << 20, stdio: ['ignore', 'pipe', 'ignore'] }); break; } catch (e) { base574 = null; }
+}
 let scope = null;
 try { scope = require('./scope-22c-0b3.js'); } catch (e) { scope = null; }
 function fnSrc(src, name) {
