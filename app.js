@@ -258,6 +258,24 @@ async function psAuthFetch(path, options) {
   }
   _keysLoaded = true;
 })();
+// ── URL DE SHEETS PARA CLOTHING (compatibilidad con Producción) ──
+// Igual que Producción: se lee savvy-config /config al arrancar y, si trae
+// sheets_url, se guarda en cl_sheets_url (Clothing & Shoes la lee al usarla).
+// Solo se usa sheets_url (https); el resto de esa respuesta se ignora y no se
+// guarda. Sin respuesta, error o JSON inválido → no pasa nada (queda el valor
+// que ya hubiera). Solo lectura: un GET, sin sesión, sin reintentos.
+var SAVVY_CONFIG_URL = 'https://savvy-config-production.up.railway.app';
+(function loadClothingSheetsUrl() {
+  try {
+    fetch(SAVVY_CONFIG_URL + '/config', { method: 'GET' })
+      .then(function(r){ return r && r.ok ? r.json() : null; })
+      .then(function(d){
+        var u = (d && typeof d.sheets_url === 'string') ? d.sheets_url.trim() : '';
+        if (/^https:\/\//i.test(u)) localStorage.setItem('cl_sheets_url', u);
+      })
+      .catch(function(){ console.warn('Could not load Clothing Sheets URL from savvy-config'); });
+  } catch(e) {}
+})();
 // ── Login System (Fase 2: la validacion ocurre en el servidor) ──
 // El diccionario de hashes se elimino: era publico en este repositorio.
 
@@ -363,30 +381,6 @@ function doLogout() {
 // Check login on load
 window.addEventListener('load', checkLogin);
 
-// ── STAGING PILOT: Add visual mark and home link ──
-window.addEventListener('load', function() {
-  try {
-    // Add STAGING badge to header/title area if exists
-    var hdrLogo = document.querySelector('.hdr') || document.querySelector('[class*="header"]') || document.body;
-    var badge = document.createElement('div');
-    badge.style.cssText = 'position:fixed;top:8px;right:8px;background:rgba(255,107,53,0.2);border:1px solid #FF6B35;border-radius:8px;padding:6px 12px;font-size:11px;font-weight:700;color:#FF6B35;z-index:9999;';
-    badge.textContent = '🧪 STAGING';
-    document.body.appendChild(badge);
-
-    // Add link to Savvy Home staging (same tab)
-    var homeLink = document.createElement('a');
-    homeLink.href = 'https://octavio-cmd.github.io/savvy-home-staging/';
-    homeLink.style.cssText = 'position:fixed;top:50px;right:8px;background:#0d0d0d;border:1px solid #2e2e2e;border-radius:8px;padding:8px 12px;font-size:11px;color:#888;text-decoration:none;z-index:9998;';
-    homeLink.textContent = '← Volver a Home';
-    homeLink.onclick = function(e) {
-      // Same tab navigation, no target=_blank
-      window.location.href = homeLink.href;
-    };
-    document.body.appendChild(homeLink);
-  } catch(e) {
-    console.warn('Could not add staging UI marks:', e.message);
-  }
-});
 // Red de seguridad: si algún overlay quedó colgado tapando la UI, limpiar al recargar
 window.addEventListener('load', function(){
   setTimeout(function(){
@@ -12208,9 +12202,18 @@ function savvyShowExportOptions(csv, fname, count) {
 document.addEventListener('DOMContentLoaded',()=>{
   if(!localStorage.getItem('savvy_ebay_id'))localStorage.setItem('savvy_ebay_id',DEF_EBAY);
 
-  // ── WARM-UP DISABLED in staging ──
-  // The background-removal service is not available in staging, so warmup is skipped.
-  // This would normally wake the service on app start, but it only exists in production.
+  // ── WARM-UP: despertar el servicio de quitar fondo al arrancar (igual que Producción) ──
+  // Un solo GET de /health, sin esperar la respuesta; si falla no pasa nada.
+  // No toca el POST real de /remove-bg ni el inventario ni las ventas.
+  try {
+    if (!window._psRembgWarmStarted) {
+      window._psRembgWarmStarted = true;
+      fetch('https://savvy-rembg-production.up.railway.app/health', { method: 'GET' })
+        .then(function(r){ return r.json(); })
+        .then(function(d){ console.log('rembg warm-up:', d && d.model_loaded ? 'ready' : 'not ready'); })
+        .catch(function(){ /* offline or asleep - not a problem */ });
+    }
+  } catch(e) {}
 
   // ── FAB + panel de export (PRIMERO — a prueba de errores posteriores) ──
   function ensureBulkOverlay(){

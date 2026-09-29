@@ -210,7 +210,10 @@ const fixesSrc = fs.readFileSync(path.join(__dirname, 'multipack-fixes.js'), 'ut
 const appSrc = fs.readFileSync(process.env.PS22C0B3_APP || path.join(__dirname, 'app.js'), 'utf8');
 // #22C-0B3 (warming auto-retry + age note) is separately scoped: guards compare
 // app.js with exactly those edits reverted.
-const appSrcG = require('./scope-22c-0b3.js').undo22c0b3(appSrc);
+// Production-compatibility hardening (Clothing Sheets URL, rembg warm-up, staging
+// badge removed) is separately scoped as well: revert exactly those edits first.
+const appSrcP = require('./scope-production-compat.js').undoProdCompat(appSrc);
+const appSrcG = require('./scope-22c-0b3.js').undo22c0b3(appSrcP);
 let loadError = null;
 try { vm.runInContext(fixesSrc, sandbox, { filename: 'multipack-fixes.js' }); } catch (e) { loadError = 'fixes: ' + e.message; }
 try { vm.runInContext(appSrc, sandbox, { filename: 'app.js' }); } catch (e) { loadError = (loadError ? loadError + ' | ' : '') + 'app.js: ' + e.message; }
@@ -653,21 +656,21 @@ checkTrue('39 location reads unchanged (one per exact SKU, GET)', ssReadCalls.le
 await waitFor(idle, 3000);
 
 section('42–47 — scope: Bulk Split / CSV / writes / auth / tokens / timeouts');
-const undone = scope ? scope.undo22c0b3(appSrc) : null;
-checkTrue('scope: every #22C-0B3 edit present exactly once', !!scope && scope.applied22c0b3(appSrc), '');
+const undone = scope ? scope.undo22c0b3(appSrcP) : null;
+checkTrue('scope: every #22C-0B3 edit present exactly once', !!scope && scope.applied22c0b3(appSrcP), '');
 checkTrue('scope: app.js minus exactly the #22C-0B3 edits is byte-identical to 574a351', base574 != null && undone === base574, '');
 const EDITED = ['psSalesReset', 'psReadSavvySales', 'psParseSavvySales', 'psSavvySalesHtml'];
 const changedFns = base574 == null ? ['?'] : (base574.match(/^(async )?function (\w+)\(/gm) || []).map(x => x.replace(/^(async )?function /, '').replace('(', ''))
-  .filter(n => fnSrc(appSrc, n) !== fnSrc(base574, n));
+  .filter(n => fnSrc(appSrcP, n) !== fnSrc(base574, n));
 checkTrue('scope: only the 4 sales display functions changed (+ the tail of saveSheetsUrl before the new section)', JSON.stringify(changedFns.filter(n => n !== 'saveSheetsUrl').sort()) === JSON.stringify(EDITED.slice().sort()), JSON.stringify(changedFns));
 const newBlock = (() => { const a = appSrc.indexOf('// ━━ #22C-0B3'); return a > 0 ? appSrc.slice(a) : ''; })();
-checkTrue('42 Bulk Split unchanged (sold.count / getDemandTier / DEMAND_TIERS / allocation / leftover untouched)', ['getDemandTier', 'computeSplit', 'updateSplitCalc', 'addSplitPacksToCSV'].every(n => base574 != null && fnSrc(appSrc, n) === fnSrc(base574, n)) && !/_splitActive|_splitManual|DEMAND_TIERS|getDemandTier|computeSplit|updateSplitCalc|bulk\b|sold\.count|leftover/.test(newBlock + EDITED.map(n => fnSrc(appSrc, n)).join('')), '');
-checkTrue('43 CSV unchanged', base574 != null && fnSrc(appSrc, 'exportCSV') === fnSrc(base574, 'exportCSV') && !/exportCSV|capturedBlobs|\bBlob\(/.test(newBlock), '');
+checkTrue('42 Bulk Split unchanged (sold.count / getDemandTier / DEMAND_TIERS / allocation / leftover untouched)', ['getDemandTier', 'computeSplit', 'updateSplitCalc', 'addSplitPacksToCSV'].every(n => base574 != null && fnSrc(appSrcP, n) === fnSrc(base574, n)) && !/_splitActive|_splitManual|DEMAND_TIERS|getDemandTier|computeSplit|updateSplitCalc|bulk\b|sold\.count|leftover/.test(newBlock + EDITED.map(n => fnSrc(appSrcP, n)).join('')), '');
+checkTrue('43 CSV unchanged', base574 != null && fnSrc(appSrcP, 'exportCSV') === fnSrc(base574, 'exportCSV') && !/exportCSV|capturedBlobs|\bBlob\(/.test(newBlock), '');
 checkTrue('44 no writes: sales reads are GET-only; new code has no fetch / write methods', salesCalls.every(c => c.method === 'GET' && !c.body) && !/fetch|psAuthFetch|method\s*:|POST|PUT|PATCH|DELETE|update-inventory|create-product/.test(newBlock), '');
-checkTrue('45 auth unchanged: every sales read (incl. retries) carries the session bearer', salesCalls.length > 0 && salesCalls.every(c => c.auth === 'Bearer fake-token') && base574 != null && fnSrc(appSrc, 'psAuthFetch') === fnSrc(base574, 'psAuthFetch'), JSON.stringify(salesCalls.slice(0, 2).map(c => c.auth)));
+checkTrue('45 auth unchanged: every sales read (incl. retries) carries the session bearer', salesCalls.length > 0 && salesCalls.every(c => c.auth === 'Bearer fake-token') && base574 != null && fnSrc(appSrcP, 'psAuthFetch') === fnSrc(base574, 'psAuthFetch'), JSON.stringify(salesCalls.slice(0, 2).map(c => c.auth)));
 checkTrue('46 token never logged or rendered', !/console\.|_psDebug|savvyToken/.test(newBlock) && !slot().includes('fake-token'), '');
 const timeoutsOf = src => (src.match(/setTimeout\([^;]*?,\s*\d+\s*\)/g) || []).map(x => x.match(/(\d+)\s*\)$/)[1]).sort().join(',');
-checkTrue('47 every existing numeric setTimeout (search 10 s, seller-listings 15 s, …) unchanged', base574 != null && timeoutsOf(appSrc) === timeoutsOf(base574), '');
+checkTrue('47 every existing numeric setTimeout (search 10 s, seller-listings 15 s, …) unchanged', base574 != null && timeoutsOf(appSrcP) === timeoutsOf(base574), '');
 
 section('B2 CONTRACT SIMULATION (mocked backend)');
 FAST();

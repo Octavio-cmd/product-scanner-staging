@@ -34,21 +34,29 @@ test('No production backend URLs in app.js', () => {
 });
 
 // ──────────────────────────────────────────────────────────────
-// TEST 3: SAVVY_CONFIG constant removed
+// TEST 3: savvy-config is read ONLY for the Clothing Sheets URL
+// (Production-compatibility hardening — Production de8ce51 contract)
 // ──────────────────────────────────────────────────────────────
-test('SAVVY_CONFIG constant removed', () => {
-  assert(!appContent.includes("const SAVVY_CONFIG="),
-    'SAVVY_CONFIG must be removed entirely');
+test('savvy-config /config read only for the Clothing Sheets URL', () => {
+  assert(appContent.includes("var SAVVY_CONFIG_URL = 'https://savvy-config-production.up.railway.app';"),
+    'the existing savvy-config service is used');
+  assert(appContent.includes("fetch(SAVVY_CONFIG_URL + '/config', { method: 'GET' })"),
+    'one plain GET to /config');
+  const m = appContent.match(/\(function loadClothingSheetsUrl\(\) \{[\s\S]*?\n\}\)\(\);/);
+  assert(m, 'loader present');
+  const fields = (m[0].match(/\bd\.[a-z_]+/g) || []).filter((v, i, a) => a.indexOf(v) === i);
+  assert.deepStrictEqual(fields, ['d.sheets_url'], 'only sheets_url is read from the config response');
+  assert(!/savvyToken|Authorization|psAuthFetch/.test(m[0]), 'no session token is sent to savvy-config');
 });
 
 // ──────────────────────────────────────────────────────────────
-// TEST 4: Legacy /config fetch eliminated
+// TEST 4: Legacy loadKeys key-loading stays removed
 // ──────────────────────────────────────────────────────────────
-test('Legacy /config endpoint fetch removed', () => {
-  assert(!appContent.includes("fetch(SAVVY_CONFIG + '/config')"),
-    'Fetch to /config must be removed');
-  assert(!appContent.includes("loadKeys()") || !appContent.includes("SAVVY_CONFIG"),
-    'loadKeys IIFE must not reference SAVVY_CONFIG');
+test('Legacy loadKeys() key loading stays removed', () => {
+  assert(!appContent.includes("loadKeys()") && !appContent.includes("const SAVVY_CONFIG="),
+    'the old loadKeys IIFE / SAVVY_CONFIG constant must not come back');
+  assert(!/DEFAULT_IMGBB_KEY\s*=\s*d\.|d\.claude|d\.imgbb/.test(appContent),
+    'no API key is ever taken from the config response');
 });
 
 // ──────────────────────────────────────────────────────────────
@@ -182,23 +190,25 @@ test('Remove-bg service blocked in staging', () => {
 });
 
 // ──────────────────────────────────────────────────────────────
-// TEST 18: STAGING badge present
+// TEST 18: STAGING identity lives in index.html, not in app.js
+// (app.js is environment-portable: same file for STAGING and Production)
 // ──────────────────────────────────────────────────────────────
-test('STAGING visual badge added', () => {
-  assert(appContent.includes("🧪 STAGING"),
-    'STAGING badge must be visible');
-  assert(appContent.includes("badge.textContent = '🧪 STAGING'") || appContent.includes("'STAGING'"),
-    'STAGING mark must be added on load');
+test('STAGING identity in index.html only (app.js environment-portable)', () => {
+  const indexContent = fs.readFileSync(path.join(__dirname, '../index.html'), 'utf-8');
+  assert(indexContent.includes('<div class="badge dw">🔧 STAGING — DEVELOPMENT</div>'),
+    'Employee STAGING page must still show its STAGING badge');
+  assert(!appContent.includes("🧪 STAGING") && !/badge\.textContent\s*=/.test(appContent),
+    'app.js must not hard-code an environment badge');
 });
 
 // ──────────────────────────────────────────────────────────────
-// TEST 19: Link to Savvy Home staging
+// TEST 19: no environment-specific Home link in app.js
 // ──────────────────────────────────────────────────────────────
-test('Link to Savvy Home staging included', () => {
-  assert(appContent.includes("https://octavio-cmd.github.io/savvy-home-staging/"),
-    'Must link to Home staging');
+test('No hard-coded environment Home link in app.js', () => {
+  assert(!appContent.includes("https://octavio-cmd.github.io/savvy-home-staging/") && !appContent.includes('← Volver a Home'),
+    'app.js must not hard-code the staging Home link');
   assert(!appContent.includes("target='_blank'") && !appContent.includes('window.open'),
-    'Link must use same-tab navigation, not new window');
+    'same-tab navigation only, no new windows');
 });
 
 // ──────────────────────────────────────────────────────────────
