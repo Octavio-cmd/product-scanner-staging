@@ -5580,6 +5580,74 @@ function updateFAB(){
   if(fabN) fabN.textContent=n;
 }
 
+// ── VALIDACIÓN DE ELECTRÓNICOS ──────────────────────────────────────────────
+// En electrónicos, Model y Connectivity deben confirmarse contra la caja.
+// La IA y el catálogo solo proponen valores; el empleado valida el dato real.
+function psIsElectronicsProduct(curObj) {
+  if (!curObj) return false;
+  var cat = String(curObj.category || '');
+  if (['80183', '171821'].indexOf(cat) !== -1) return true;
+  var text = String((curObj._selectedTitle || curObj.title || '') + ' ' + (curObj.categoryName || '')).toLowerCase();
+  return /\b(headsets?|headphones?|earbuds?|earphones?|speakers?|microphones?|gaming audio)\b/.test(text);
+}
+
+function psCatalogAspectValue(curObj, wantedNames) {
+  var aspects = curObj && curObj.prod && curObj.prod.aspects;
+  if (!aspects || typeof aspects !== 'object') return '';
+  var wanted = wantedNames.map(function(name){ return String(name).toLowerCase(); });
+  for (var key in aspects) {
+    if (!aspects.hasOwnProperty(key) || wanted.indexOf(String(key).toLowerCase()) === -1) continue;
+    var value = aspects[key];
+    if (Array.isArray(value)) value = value[0];
+    value = String(value == null ? '' : value).trim();
+    if (value) return value;
+  }
+  return '';
+}
+
+function psIsGenericConnectivity(value) {
+  return /^(universal|other|unknown|not specified|does not apply|n\/a)$/i.test(String(value || '').trim());
+}
+
+function psConfirmElectronicsSpecifics(curObj) {
+  if (!psIsElectronicsProduct(curObj)) return true;
+  if (!curObj._specifics || typeof curObj._specifics !== 'object') curObj._specifics = {};
+  var specs = curObj._specifics;
+
+  var catalogModel = psCatalogAspectValue(curObj, ['Model']);
+  var catalogMpn = psCatalogAspectValue(curObj, ['MPN', 'Manufacturer Part Number']);
+  if (!catalogModel && catalogMpn && !/^(does not apply|n\/a|unknown)$/i.test(catalogMpn)) catalogModel = catalogMpn;
+  var proposedModel = catalogModel || String(specs.Model || '').trim();
+  var modelAnswer = prompt(
+    '🎧 CONFIRMA EL MODELO\n\n' +
+    'La aplicación propone: ' + (proposedModel || '(vacío)') + '\n\n' +
+    'Lee el modelo exacto en la caja o etiqueta y corrígelo si es necesario.',
+    proposedModel
+  );
+  if (modelAnswer === null) return false;
+  modelAnswer = String(modelAnswer).trim();
+  if (!modelAnswer) { toast('⚠️ Falta el modelo exacto del producto'); return false; }
+  specs.Model = modelAnswer.substring(0, 65);
+
+  var catalogConnectivity = psCatalogAspectValue(curObj, ['Connectivity', 'Connection', 'Connector']);
+  var proposedConnectivity = catalogConnectivity || String(specs.Connectivity || '').trim();
+  if (psIsGenericConnectivity(proposedConnectivity)) proposedConnectivity = '';
+  var connectivityAnswer = prompt(
+    '🔌 CONFIRMA LA CONECTIVIDAD\n\n' +
+    'La aplicación propone: ' + (proposedConnectivity || '(vacío)') + '\n\n' +
+    'Lee la conexión exacta en la caja. Ejemplos: 3.5mm Jack, USB-C, Bluetooth.',
+    proposedConnectivity
+  );
+  if (connectivityAnswer === null) return false;
+  connectivityAnswer = String(connectivityAnswer).trim();
+  if (!connectivityAnswer || psIsGenericConnectivity(connectivityAnswer)) {
+    toast('⚠️ Connectivity debe ser específica; no uses "Universal"');
+    return false;
+  }
+  specs.Connectivity = connectivityAnswer.substring(0, 65);
+  return true;
+}
+
 async function addBulk() {
   // Log al inicio para confirmar que el botón sí se está disparando
   console.log('🟢 addBulk called - cur:', cur ? cur.upc : 'NULL');
@@ -5801,6 +5869,7 @@ function psApplyCount(title, nuevo, category) {
 }
 
 async function _addBulkInternal() {
+  if (cur && !psConfirmElectronicsSpecifics(cur)) return;
   // ── Confirmar medidas que no se pueden verificar ──────────────────────
   // ARN-723122200621 salió con C:Volume = "4 oz" y el título NO menciona
   // ningún tamaño. Es el mismo caso del CoQ10 "120ct": un número que viene
@@ -11085,6 +11154,8 @@ async function exportCSV(){
     'Scent':'C:Scent', 'Scent Type':'C:Scent',
     'Flavor':'C:Flavor',
     'Color':'C:Color',
+    'Model':'C:Model',
+    'Connectivity':'C:Connectivity',
     'Formulation':'C:Formulation', 'Item Form':'C:Item Form',
     'Active Ingredients':'C:Active Ingredients',
     'Ingredients':'C:Ingredients',
@@ -11998,6 +12069,10 @@ async function exportCSV(){
       }
     }
     function _specForCol(col){ return _specByCol[col] || ''; }
+
+    // Model y Connectivity confirmados por el empleado o generados por IA.
+    modelVal = modelVal || _specForCol('C:Model');
+    connectivityVal = connectivityVal || _specForCol('C:Connectivity');
 
     var _rawUpc = String((it.upc || '')).replace(/[^0-9]/g, '');
     if (!_rawUpc && it.sku) {
