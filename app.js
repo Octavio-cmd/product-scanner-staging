@@ -5645,6 +5645,10 @@ function psConfirmElectronicsSpecifics(curObj) {
     return false;
   }
   specs.Connectivity = connectivityAnswer.substring(0, 65);
+  // Refrescar inmediatamente el panel visible. Sin esto, los valores sí se
+  // guardaban para el CSV, pero el empleado seguía viendo los datos viejos
+  // de la IA (por ejemplo, Connectivity: Universal).
+  if (typeof renderSpecificsPreview === 'function') renderSpecificsPreview(specs);
   return true;
 }
 
@@ -6031,6 +6035,10 @@ async function _addBulkInternal() {
 
   // #21: un pack que ya existe no se agrega como listado nuevo.
   if (psIsPackLocked(cur.upc, packs) && !psLockSessionEditAllowed(cur.upc, usedSKU)) {
+    window._psLastAddResult = {
+      added: 0, replaced: 0, skippedDup: 1, mode: 'single', reason: 'pack_locked',
+      message: '🔒 ' + packs + 'pk ya existe en Sellbrite/eBay'
+    };
     toast('🔒 ' + packs + 'pk ya existe en Sellbrite/eBay — no se agrega. Actualiza su inventario en el Bulk Split.');
     return;
   }
@@ -6053,6 +6061,10 @@ async function _addBulkInternal() {
   var _rtfMatchesThisUpc = _psReturnToFixUpc && _psReturnToFixUpc === cur.upc;
   var _rtfMatchesThisSku = _rtfMatchesThisUpc && (!_psReturnToFixSku || _psReturnToFixSku === usedSKU);
   if (bulk.find(function(b){ return b.upc === cur.upc; }) && !_rtfMatchesThisSku) {
+    window._psLastAddResult = {
+      added: 0, replaced: 0, skippedDup: 1, mode: 'single', reason: 'already_in_csv',
+      message: 'ℹ️ Este UPC ya está en el CSV'
+    };
     toast('⚠️ Already in CSV'); return;
   }
 
@@ -6079,6 +6091,10 @@ async function _addBulkInternal() {
     cur._bundleImg = bundlePreviewImg.src;
   }
   if (!hasPhoto) {
+    window._psLastAddResult = {
+      added: 0, replaced: 0, skippedDup: 0, mode: 'single', reason: 'missing_photo',
+      message: '📷 Falta fotografía requerida'
+    };
     var _photoWarnOv = document.createElement('div');
     _photoWarnOv.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.88);z-index:99999;'
       + 'display:flex;flex-direction:column;align-items:center;justify-content:center;padding:28px;gap:14px;text-align:center';
@@ -10246,7 +10262,8 @@ function renderResult(r){
         } else {
           // NO se agregó nada — feedback amarillo. #21E: si fue un Bulk Split,
           // se dice la razón real (foto, 0 listados, ya en CSV, bloqueados…).
-          var _why = (_r && _r.mode === 'split' && _r.reason && typeof PS_SPLIT_MSG !== 'undefined') ? PS_SPLIT_MSG[_r.reason] : null;
+          var _why = (_r && _r.message) ||
+            ((_r && _r.mode === 'split' && _r.reason && typeof PS_SPLIT_MSG !== 'undefined') ? PS_SPLIT_MSG[_r.reason] : null);
           addB.textContent = _why || '⚠️ Ya estaba o requisitos faltan';
           addB.style.background = '#ff9800';
           addB.style.opacity = '1';
