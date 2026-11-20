@@ -7832,6 +7832,8 @@ async function exportCSV(){
     'Scent':'C:Scent', 'Scent Type':'C:Scent',
     'Flavor':'C:Flavor',
     'Color':'C:Color',
+        'Model':'C:Model',
+    'Connectivity':'C:Connectivity',
     'Formulation':'C:Formulation', 'Item Form':'C:Item Form',
     'Active Ingredients':'C:Active Ingredients',
     'Ingredients':'C:Ingredients',
@@ -8562,7 +8564,13 @@ async function exportCSV(){
         _specByCol[_col] = String(_itSpecs[_sk]).trim();
       }
     }
-    function _specForCol(col){ return _specByCol[col] || ''; }
+        function _specForCol(col){ return _specByCol[col] || ''; }
+
+    // Model y Connectivity pueden venir de los Item Specifics generados por IA.
+    // Los detectores locales del título conservan prioridad cuando encontraron
+    // un valor verificable; de lo contrario usamos el specific ya analizado.
+    modelVal = modelVal || _specForCol('C:Model');
+    connectivityVal = connectivityVal || _specForCol('C:Connectivity');
 
     var _rawUpc = String((it.upc || '')).replace(/[^0-9]/g, '');
     if (!_rawUpc && it.sku) {
