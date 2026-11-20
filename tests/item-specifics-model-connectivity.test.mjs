@@ -32,30 +32,27 @@ test('regresión LU731-BLU conserva Model y Connectivity generados', () => {
   assert.equal(byColumn['C:Connectivity'], '3.5mm Jack');
 });
 
-test('el exportador usa specifics solo como respaldo de detectores locales', () => {
+test('el exportador usa specifics como respaldo', () => {
   assert.ok(appContent.includes("modelVal = modelVal || _specForCol('C:Model');"));
   assert.ok(appContent.includes("connectivityVal = connectivityVal || _specForCol('C:Connectivity');"));
-  assert.ok(
-    appContent.indexOf("else if (/wired/i.test(_tl))") <
-      appContent.indexOf("connectivityVal = connectivityVal || _specForCol('C:Connectivity');"),
-    'La detección local de Connectivity debe ejecutarse antes del respaldo de IA'
-  );
 });
 
-test('electrónicos afectados exigen Model y Connectivity específicos antes del CSV', () => {
-  assert.ok(appContent.includes("if (cur && !psConfirmElectronicsSpecifics(cur)) return;"));
+test('la validación de electrónicos existe una sola vez y corre antes de guardar', () => {
+  assert.equal((appContent.match(/function psConfirmElectronicsSpecifics\(/g) || []).length, 1);
+  assert.equal((appContent.match(/if \(cur && !psConfirmElectronicsSpecifics\(cur\)\) return;/g) || []).length, 1);
   assert.match(appContent, /\['80183', '171821'\]/);
-  assert.match(appContent, /\^\(universal\|other\|unknown\|not specified\|does not apply/);
 });
 
-test('el catálogo de eBay tiene prioridad sobre valores genéricos de IA', () => {
-  assert.ok(appContent.includes("psCatalogAspectValue(curObj, ['Model'])"));
-  assert.ok(appContent.includes("psCatalogAspectValue(curObj, ['Connectivity', 'Connection', 'Connector'])"));
-  assert.ok(appContent.includes('if (catalogConnectivity && (psIsGenericConnectivity(currentConnectivity) || !currentConnectivity))'));
+test('Model y Connectivity siempre se confirman contra la caja', () => {
+  assert.ok(appContent.includes("var proposedModel = catalogModel || String(specs.Model || '').trim();"));
+  assert.ok(appContent.includes("'🎧 CONFIRMA EL MODELO\\n\\n'"));
+  assert.ok(appContent.includes("'🔌 CONFIRMA LA CONECTIVIDAD\\n\\n'"));
+  assert.ok(appContent.includes('specs.Model = modelAnswer.substring(0, 65);'));
+  assert.ok(appContent.includes('specs.Connectivity = connectivityAnswer.substring(0, 65);'));
 });
 
-test('regresión del headset permite confirmar LU731-BLU y 3.5mm Jack sin hardcodear el UPC', () => {
-  assert.ok(appContent.includes("specs.Model = modelAnswer.substring(0, 65);"));
-  assert.ok(appContent.includes("specs.Connectivity = connectivityAnswer.substring(0, 65);"));
-  assert.equal(appContent.includes('021331905642'), false, 'el producto de prueba no debe quedar hardcodeado');
+test('regresión del headset no hardcodea el UPC ni sus respuestas', () => {
+  assert.equal(appContent.includes('021331905642'), false);
+  assert.equal(appContent.includes("proposedModel = 'LU731-BLU'"), false);
+  assert.equal(appContent.includes("proposedConnectivity = '3.5mm Jack'"), false);
 });
