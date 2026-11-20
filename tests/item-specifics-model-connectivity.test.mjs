@@ -40,6 +40,17 @@ test('el exportador conserva Model y Connectivity confirmados', () => {
   assert.ok(appContent.includes("connectivityVal = connectivityVal || _specForCol('C:Connectivity');"));
 });
 
+test('el panel visible se actualiza después de confirmar electrónicos', () => {
+  assert.ok(appContent.includes("renderSpecificsPreview(specs);"));
+});
+
+test('el botón explica el motivo exacto del bloqueo', () => {
+  assert.ok(appContent.includes("reason: 'pack_locked'"));
+  assert.ok(appContent.includes("message: '🔒 ' + packs + 'pk ya existe en Sellbrite/eBay'"));
+  assert.ok(appContent.includes("message: '📷 Falta fotografía requerida'"));
+  assert.ok(appContent.includes("var _why = (_r && _r.message) ||"));
+});
+
 test('regresión del headset no hardcodea UPC ni respuestas', () => {
   assert.equal(appContent.includes('021331905642'), false);
   assert.equal(appContent.includes("proposedModel = 'LU731-BLU'"), false);
@@ -47,5 +58,5 @@ test('regresión del headset no hardcodea UPC ni respuestas', () => {
 });
 
 test('index obliga al navegador a cargar la versión corregida', () => {
-  assert.ok(indexContent.includes('app.js?v=2026-11-20-electronics-confirm-v1'));
+  assert.ok(indexContent.includes('app.js?v=2026-11-20-electronics-feedback-v2'));
 });
