@@ -41,3 +41,21 @@ test('el exportador usa specifics solo como respaldo de detectores locales', () 
     'La detección local de Connectivity debe ejecutarse antes del respaldo de IA'
   );
 });
+
+test('electrónicos afectados exigen Model y Connectivity específicos antes del CSV', () => {
+  assert.ok(appContent.includes("if (cur && !psConfirmElectronicsSpecifics(cur)) return;"));
+  assert.match(appContent, /\['80183', '171821'\]/);
+  assert.match(appContent, /\^\(universal\|other\|unknown\|not specified\|does not apply/);
+});
+
+test('el catálogo de eBay tiene prioridad sobre valores genéricos de IA', () => {
+  assert.ok(appContent.includes("psCatalogAspectValue(curObj, ['Model'])"));
+  assert.ok(appContent.includes("psCatalogAspectValue(curObj, ['Connectivity', 'Connection', 'Connector'])"));
+  assert.ok(appContent.includes('if (catalogConnectivity && (psIsGenericConnectivity(currentConnectivity) || !currentConnectivity))'));
+});
+
+test('regresión del headset permite confirmar LU731-BLU y 3.5mm Jack sin hardcodear el UPC', () => {
+  assert.ok(appContent.includes("specs.Model = modelAnswer.substring(0, 65);"));
+  assert.ok(appContent.includes("specs.Connectivity = connectivityAnswer.substring(0, 65);"));
+  assert.equal(appContent.includes('021331905642'), false, 'el producto de prueba no debe quedar hardcodeado');
+});
