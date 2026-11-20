@@ -1,4 +1,89 @@
-  // ── ON-SCREEN DEBUG CONSOLE — para ver errores directo en el iPhone,
+  // ── VALIDACIÓN DE ELECTRÓNICOS ──────────────────────────────────────────────
+// Model y Connectivity son obligatorios en varias categorías de electrónica.
+// La IA no siempre puede conocer el modelo impreso en la caja y a veces devuelve
+// valores genéricos como "Universal". En esos casos se confirma contra el envase
+// antes de agregar el producto al CSV, sin bloquear las demás categorías.
+function psIsElectronicsProduct(curObj) {
+  if (!curObj) return false;
+  var cat = String(curObj.category || '');
+  if (['80183', '171821'].indexOf(cat) !== -1) return true;
+  var text = String((curObj._selectedTitle || curObj.title || '') + ' ' + (curObj.categoryName || '')).toLowerCase();
+  return /\b(headsets?|headphones?|earbuds?|earphones?|speakers?|microphones?|gaming audio)\b/.test(text);
+}
+
+function psCatalogAspectValue(curObj, wantedNames) {
+  var aspects = curObj && curObj.prod && curObj.prod.aspects;
+  if (!aspects || typeof aspects !== 'object') return '';
+  var wanted = wantedNames.map(function(name){ return String(name).toLowerCase(); });
+  for (var key in aspects) {
+    if (!aspects.hasOwnProperty(key) || wanted.indexOf(String(key).toLowerCase()) === -1) continue;
+    var value = aspects[key];
+    if (Array.isArray(value)) value = value[0];
+    value = String(value == null ? '' : value).trim();
+    if (value) return value;
+  }
+  return '';
+}
+
+function psIsGenericConnectivity(value) {
+  return /^(universal|other|unknown|not specified|does not apply|n\/a)$/i.test(String(value || '').trim());
+}
+
+function psConfirmElectronicsSpecifics(curObj) {
+  if (!psIsElectronicsProduct(curObj)) return true;
+  if (!curObj._specifics || typeof curObj._specifics !== 'object') curObj._specifics = {};
+  var specs = curObj._specifics;
+
+  // Los aspectos del catálogo de eBay son datos del producto y tienen prioridad
+  // sobre una inferencia de IA. MPN solo sirve como respaldo si es un código real.
+  if (!String(specs.Model || '').trim()) {
+    var catalogModel = psCatalogAspectValue(curObj, ['Model']);
+    var catalogMpn = psCatalogAspectValue(curObj, ['MPN', 'Manufacturer Part Number']);
+    if (!catalogModel && catalogMpn && !/^(does not apply|n\/a|unknown)$/i.test(catalogMpn)) catalogModel = catalogMpn;
+    if (catalogModel) specs.Model = catalogModel;
+  }
+
+  var currentConnectivity = String(specs.Connectivity || '').trim();
+  var catalogConnectivity = psCatalogAspectValue(curObj, ['Connectivity', 'Connection', 'Connector']);
+  if (catalogConnectivity && (psIsGenericConnectivity(currentConnectivity) || !currentConnectivity)) {
+    specs.Connectivity = catalogConnectivity;
+    currentConnectivity = catalogConnectivity;
+  }
+
+  if (!String(specs.Model || '').trim()) {
+    var modelAnswer = prompt(
+      '🎧 CONFIRMA EL MODELO\n\n' +
+      'eBay requiere el modelo exacto para este producto.\n' +
+      'Léelo en la caja o etiqueta (ejemplo: LU731-BLU).',
+      ''
+    );
+    if (modelAnswer === null) return false;
+    modelAnswer = String(modelAnswer).trim();
+    if (!modelAnswer) { toast('⚠️ Falta el modelo exacto del producto'); return false; }
+    specs.Model = modelAnswer.substring(0, 65);
+  }
+
+  currentConnectivity = String(specs.Connectivity || '').trim();
+  if (!currentConnectivity || psIsGenericConnectivity(currentConnectivity)) {
+    var connectivityAnswer = prompt(
+      '🔌 CONFIRMA LA CONECTIVIDAD\n\n' +
+      'Escribe la conexión física indicada en la caja.\n' +
+      'Ejemplos: 3.5mm Jack, USB-C, Bluetooth.',
+      psIsGenericConnectivity(currentConnectivity) ? '' : currentConnectivity
+    );
+    if (connectivityAnswer === null) return false;
+    connectivityAnswer = String(connectivityAnswer).trim();
+    if (!connectivityAnswer || psIsGenericConnectivity(connectivityAnswer)) {
+      toast('⚠️ Connectivity debe ser específica; no uses "Universal"');
+      return false;
+    }
+    specs.Connectivity = connectivityAnswer.substring(0, 65);
+  }
+
+  return true;
+}
+
+// ── ON-SCREEN DEBUG CONSOLE — para ver errores directo en el iPhone,
 // sin necesitar Mac ni Safari Web Inspector. Toca el logo 5 veces para abrir/cerrar. ──
 (function setupDebugConsole(){
   var logs = [];
@@ -4489,6 +4574,18 @@ function updateFAB(){
   if(fabN) fabN.textContent=n;
 }
 
+    // Electrónicos: detener el guardado si Model/Connectivity siguen ausentes
+  // o son genéricos. La persona que tiene la caja confirma el dato real.
+    // Electrónicos: detener el guardado si Model/Connectivityif (cur && !psConfirmElectronicsSpecifics(cur)) return;
+
+// Electrónicos: detener el guardado si Model/Connectivity siguen ausentes
+  // o son genéricos. La persona que tiene la caja confirma el dato real.
+    // Electrónicos: detener el guardado si Model/Connectivity siguen ausentes
+  // o son genéricos. La persona que tiene la caja confirma el dato real.
+  if (cur && !psConfirmElectronicsSpecifics(cur)) return;
+
+if (cur && !psConfirmElectronicsSpecifics(cur)) return;
+
 async function addBulk() {
   // Log al inicio para confirmar que el botón sí se está disparando
   console.log('🟢 addBulk called - cur:', cur ? cur.upc : 'NULL');
@@ -4533,10 +4630,96 @@ async function addBulk() {
     // subir el listado a tiempo que bloquear indefinidamente.
   }
 
-  // ⚠️ VALIDACIÓN CRÍTICA: Verificar campos obligatorios por categoría
-  var cat = String(cur.category || '');
-  var shadeVal = cur._specifics && cur._specifics['Shade'] ? String(cur._specifics['Shade']).trim() : '';
-  
+    // Electrónicos: detener el guardado si Model/Connectivity siguen ausentes
+  // o son genéricos. La persona que tiene la caja confirma el dato real.
+  if (cur && !psConfirmElectronicsSpecifics(cur)) return;
+
+// ── VALIDACIÓN DE ELECTRÓNICOS ──────────────────────────────────────────────
+// Model y Connectivity son obligatorios en varias categorías de electrónica.
+// La IA no siempre puede conocer el modelo impreso en la caja y a veces devuelve
+// valores genéricos como "Universal". En esos casos se confirma contra el envase
+// antes de agregar el producto al CSV, sin bloquear las demás categorías.
+function psIsElectronicsProduct(curObj) {
+  if (!curObj) return false;
+  var cat = String(curObj.category || '');
+  if (['80183', '171821'].indexOf(cat) !== -1) return true;
+  var text = String((curObj._selectedTitle || curObj.title || '') + ' ' + (curObj.categoryName || '')).toLowerCase();
+  return /\b(headsets?|headphones?|earbuds?|earphones?|speakers?|microphones?|gaming audio)\b/.test(text);
+}
+
+function psCatalogAspectValue(curObj, wantedNames) {
+  var aspects = curObj && curObj.prod && curObj.prod.aspects;
+  if (!aspects || typeof aspects !== 'object') return '';
+  var wanted = wantedNames.map(function(name){ return String(name).toLowerCase(); });
+  for (var key in aspects) {
+    if (!aspects.hasOwnProperty(key) || wanted.indexOf(String(key).toLowerCase()) === -1) continue;
+    var value = aspects[key];
+    if (Array.isArray(value)) value = value[0];
+    value = String(value == null ? '' : value).trim();
+    if (value) return value;
+  }
+  return '';
+}
+
+function psIsGenericConnectivity(value) {
+  return /^(universal|other|unknown|not specified|does not apply|n\/a)$/i.test(String(value || '').trim());
+}
+
+function psConfirmElectronicsSpecifics(curObj) {
+  if (!psIsElectronicsProduct(curObj)) return true;
+  if (!curObj._specifics || typeof curObj._specifics !== 'object') curObj._specifics = {};
+  var specs = curObj._specifics;
+
+  // Los aspectos del catálogo de eBay son datos del producto y tienen prioridad
+  // sobre una inferencia de IA. MPN solo sirve como respaldo si es un código real.
+  if (!String(specs.Model || '').trim()) {
+    var catalogModel = psCatalogAspectValue(curObj, ['Model']);
+    var catalogMpn = psCatalogAspectValue(curObj, ['MPN', 'Manufacturer Part Number']);
+    if (!catalogModel && catalogMpn && !/^(does not apply|n\/a|unknown)$/i.test(catalogMpn)) catalogModel = catalogMpn;
+    if (catalogModel) specs.Model = catalogModel;
+  }
+
+  var currentConnectivity = String(specs.Connectivity || '').trim();
+  var catalogConnectivity = psCatalogAspectValue(curObj, ['Connectivity', 'Connection', 'Connector']);
+  if (catalogConnectivity && (psIsGenericConnectivity(currentConnectivity) || !currentConnectivity)) {
+    specs.Connectivity = catalogConnectivity;
+    currentConnectivity = catalogConnectivity;
+  }
+
+  if (!String(specs.Model || '').trim()) {
+    var modelAnswer = prompt(
+      '🎧 CONFIRMA EL MODELO\n\n' +
+      'eBay requiere el modelo exacto para este producto.\n' +
+      'Léelo en la caja o etiqueta (ejemplo: LU731-BLU).',
+      ''
+    );
+    if (modelAnswer === null) return false;
+    modelAnswer = String(modelAnswer).trim();
+    if (!modelAnswer) { toast('⚠️ Falta el modelo exacto del producto'); return false; }
+    specs.Model = modelAnswer.substring(0, 65);
+  }
+
+  currentConnectivity = String(specs.Connectivity || '').trim();
+  if (!currentConnectivity || psIsGenericConnectivity(currentConnectivity)) {
+    var connectivityAnswer = prompt(
+      '🔌 CONFIRMA LA CONECTIVIDAD\n\n' +
+      'Escribe la conexión física indicada en la caja.\n' +
+      'Ejemplos: 3.5mm Jack, USB-C, Bluetooth.',
+      psIsGenericConnectivity(currentConnectivity) ? '' : currentConnectivity
+    );
+    if (connectivityAnswer === null) return false;
+    connectivityAnswer = String(connectivityAnswer).trim();
+    if (!connectivityAnswer || psIsGenericConnectivity(connectivityAnswer)) {
+      toast('⚠️ Connectivity debe ser específica; no uses "Universal"');
+      return false;
+    }
+    specs.Connectivity = connectivityAnswer.substring(0, 65);
+  }
+
+  return true;
+}
+
+
   // Categorías que REQUIEREN Shade obligatoriamente
   var shadeRequiredCats = ['172023', '31804']; // 172023=Lash/Brow, 31804=Lipstick
   if (shadeRequiredCats.includes(cat)) {
